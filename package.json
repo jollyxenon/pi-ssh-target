@@ -1,0 +1,47 @@
+{
+  "name": "pi-ssh-target",
+  "version": "0.1.0",
+  "description": "Pi package that steers an agent when a remote Linux process tree terminates",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "ssh",
+    "process-monitoring"
+  ],
+  "license": "MIT",
+  "files": [
+    "src",
+    "dist",
+    "README.md"
+  ],
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test:python": "python3 -B -m unittest discover -s tests/python -v",
+    "test:unit": "vitest run tests/unit",
+    "test:integration": "vitest run tests/integration",
+    "test": "npm run test:python && vitest run",
+    "build": "tsc -p tsconfig.build.json && cp src/watcher.py dist/watcher.py",
+    "pack:check": "npm pack --dry-run"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-ai": "^0.83.0",
+    "@earendil-works/pi-coding-agent": "^0.83.0",
+    "@types/node": "^24.12.0",
+    "typebox": "^1.3.7",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.10"
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  }
+}

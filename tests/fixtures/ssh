@@ -1,0 +1,49 @@
+#!/usr/bin/env node
+import { appendFileSync } from "node:fs";
+
+let input = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (chunk) => {
+  input += chunk;
+});
+process.stdin.on("end", () => {
+  const match = input.match(/WATCHER_CONFIG = json\.loads\((.+)\)/);
+  if (!match) process.exit(90);
+  const config = JSON.parse(JSON.parse(match[1]));
+  if (process.env.FAKE_SSH_COUNT_FILE) appendFileSync(process.env.FAKE_SSH_COUNT_FILE, "1\n");
+  const prefix = "@@PI_SSH_TARGET@@";
+  const base = {
+    watch_id: config.watch_id,
+    job_id: config.job_id,
+    host: config.host,
+    root_pid: config.root_pid,
+    process_count: 2,
+    observed_at: "2025-01-01T00:00:00.000Z",
+    state_file: `/tmp/pi-ssh-target-test/${config.watch_id}.json`,
+  };
+  const send = (event) => process.stdout.write(prefix + JSON.stringify({ ...base, ...event }) + "\n");
+  if (config.host === "no-ready") {
+    setInterval(() => {}, 1000);
+    return;
+  }
+  if (config.host === "interrupt-resume") {
+    send({ event: "interrupt", error_code: "state_missing", error: "state file is missing" });
+    return;
+  }
+  send({ event: "ready" });
+  if (config.host === "finish") {
+    send({ event: "finish" });
+    return;
+  }
+  if (config.host === "close") {
+    process.stderr.write("x".repeat(2500));
+    process.exitCode = 7;
+    return;
+  }
+  if (config.host === "duplicate-terminal") {
+    send({ event: "finish" });
+    send({ event: "interrupt", error_code: "late", error: "ignored" });
+    return;
+  }
+  setInterval(() => {}, 1000);
+});
