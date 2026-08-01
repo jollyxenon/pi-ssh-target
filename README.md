@@ -1,10 +1,10 @@
 # pi-ssh-target
 
-`pi-ssh-target` 是一个 Pi package。它通过后台 SSH 监控远程 Linux 进程树；当进程树结束、Watcher 中断或 SSH 通道异常关闭时，插件会立即用 `steer` 唤醒当前 Pi session。
+`pi-ssh-target` 是一个用于 Pi 的 SSH 进程监控插件。Agent 在远程 Linux 主机上启动长任务后，可以把任务的根 PID 交给插件。插件会在后台跟踪这棵进程树；任务结束、Watcher 中断或 SSH 连接异常关闭时，它会通过 `steer` 唤醒原来的 Pi session。
 
-插件只负责“监控并通知”，不会启动任务、判断任务是否成功，也不会自动读取远程日志或产物。
+插件只做两件事：监控进程树，发送通知。它不会替 Agent 启动任务、判断任务是否成功，也不会主动读取远程日志和产物。
 
-## 运行条件
+## 运行环境
 
 本机需要：
 
@@ -21,36 +21,40 @@
 
 如果任务运行在容器中，传入的 PID 必须与 SSH 登录后看到的 PID namespace 一致。插件不会在宿主机 PID 与容器 PID 之间做映射。
 
-## 安装与启用
+## 安装
 
-从本地目录安装：
-
-```bash
-pi install /absolute/path/to/pi-ssh-target
-```
-
-只在当前项目启用：
+项目目前没有发布到 npm，也还没有版本标签。请直接从 GitHub 的 `main` 分支安装：
 
 ```bash
-pi install -l /absolute/path/to/pi-ssh-target
+pi install git:github.com/jollyxenon/pi-ssh-target
 ```
 
-发布到 npm 或 git 后，也可以使用 Pi package source：
+这会把插件写入用户级配置，对所有项目生效。只想在当前项目使用时，加上 `-l`：
 
 ```bash
-pi install npm:pi-ssh-target
-pi install git:github.com/OWNER/pi-ssh-target@TAG
+pi install -l git:github.com/jollyxenon/pi-ssh-target
 ```
 
-临时试用，不写入 settings：
+想先试用、不修改配置，可以运行：
 
 ```bash
-pi -e /absolute/path/to/pi-ssh-target
+pi -e git:github.com/jollyxenon/pi-ssh-target
 ```
 
-安装后可运行 `pi config` 检查 package 是否启用。项目级 package 只有在项目被信任后才会加载。
+本地开发时也可以从仓库目录加载：
 
-## Agent 工具
+```bash
+git clone https://github.com/jollyxenon/pi-ssh-target.git
+cd pi-ssh-target
+npm install
+pi -e .
+```
+
+安装后运行 `pi config`，可以检查 package 和扩展是否已启用。项目级 package 只有在项目被信任后才会加载。
+
+> Pi package 拥有当前用户的完整系统权限。安装前请先检查仓库代码。
+
+## 工具用法
 
 Package 注册一个工具：`pi_ssh_target`。工具有三种 action：`watch`、`cancel`、`list`。
 
@@ -157,7 +161,7 @@ boot_id + PID + start_ticks
 
 `/tmp` 可能被系统清理。session 恢复时，如果状态文件缺失、损坏、不可读，或者服务器 boot ID 已变化，Watcher 会发送 `interrupt`，不会改用其他目录，也不会从根 PID 重新建立状态。远程 Python 3.8 及更高版本可运行 Watcher。
 
-## 三种通知终态
+## 通知类型
 
 ### `finish`
 
@@ -171,7 +175,7 @@ Watcher 因 `/proc` 权限、解析、状态文件读写、boot ID 不匹配或�
 
 SSH 在 `ready` 后退出，但没有合法的 `finish` 或 `interrupt`。任务状态未知。事件会附带 SSH exit code、signal 和 stderr 尾部最多 2000 字节。
 
-每个终态独立调用：
+插件会为每个终态单独调用：
 
 ```ts
 pi.sendMessage(message, { triggerTurn: true, deliverAs: "steer" })
@@ -191,7 +195,7 @@ pi.sendMessage(message, { triggerTurn: true, deliverAs: "steer" })
 
 `/reload`、session 切换或 Pi shutdown 时，当前扩展实例会主动关闭它管理的 SSH 子进程，不产生 `close`。新实例会重放当前 session branch；只有最后状态仍为 `started` 的 watch 才会使用原来的 host、`ssh_args`、PID、job 元数据、扫描间隔和启动超时恢复。所有终态 watch 都会跳过。
 
-## 典型 Agent 工作流
+## 常见用法
 
 1. Agent 通过普通 SSH 启动长任务，并获得远程根 PID。
 2. Agent 调用 `pi_ssh_target` 的 `watch` action。
@@ -199,7 +203,7 @@ pi.sendMessage(message, { triggerTurn: true, deliverAs: "steer" })
 4. 远程进程树进入 `finish`、`interrupt` 或 `close` 后，插件独立 steer 当前 session。
 5. Agent 根据提示检查日志和产物，再继续原计划。
 
-## 明确限制
+## 限制
 
 - 不提供 SSH 或 Watcher 自动重试。
 - 不补发 Pi 离线期间错过的事件。
@@ -226,4 +230,4 @@ npm run pack:check
 openspec validate --change create-pi-ssh-target-plugin
 ```
 
-`test:integration` 包含假 SSH 行为测试，以及 Linux/WSL 本机真实父子进程树的端到端测试。实际远程 smoke test 已在 `datatech013`（Linux、Python 3.8.10）通过，并验证了自定义 `ssh_args[]`、`finish` steer、`0600` 状态文件和 `0700` 状态目录。
+`test:integration` 包含模拟 SSH 的行为测试，以及 Linux/WSL 本机父子进程树的端到端测试。远程 smoke test 已在 `datatech013`（Linux、Python 3.8.10）通过，覆盖自定义 `ssh_args[]`、`finish` steer、`0600` 状态文件和 `0700` 状态目录。
