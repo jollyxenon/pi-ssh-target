@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -83,6 +83,16 @@ describe.sequential("SshWatchManager", () => {
     await delay(30);
     expect(terminals).toEqual([]);
     expect(manager.has("watch-1")).toBe(false);
+  });
+
+  it("rejects a pre-aborted start before spawning SSH", async () => {
+    const manager = new SshWatchManager(() => {}, undefined, "# fake watcher");
+    const controller = new AbortController();
+    controller.abort();
+    await expect(manager.start(config("hang"), controller.signal)).rejects.toThrow("启动已取消");
+    const countFile = process.env.FAKE_SSH_COUNT_FILE;
+    if (!countFile) throw new Error("missing fake SSH count file");
+    expect(existsSync(countFile)).toBe(false);
   });
 
   it("never relaunches a persisted start config through the watch-only path", async () => {

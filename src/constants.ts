@@ -26,7 +26,6 @@ export const PROTOCOL_PREFIX = "@@PI_SSH_TARGET@@";
 export const LIFECYCLE_ENTRY_TYPE = "pi-ssh-target-lifecycle";
 export const AUDIT_ENTRY_TYPE = "pi-ssh-target-audit";
 export const MESSAGE_TYPE = "pi-ssh-target-terminal";
-export const AUDIT_MESSAGE_TYPE = "pi-ssh-target-audit-request";
 
 /** Validates metadata shared by watch and start before SSH is created. */
 function validateMetadata(input: WatchMetadataInput): string | undefined {

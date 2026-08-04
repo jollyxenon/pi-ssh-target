@@ -20,6 +20,7 @@ export type SpawnFunction = typeof spawn;
 /** Owns one independent SSH child process per active watch. */
 export class SshWatchManager {
   private readonly active = new Map<string, ActiveWatch>();
+  private readonly ownership = new Map<string, ActiveWatch>();
   private readonly watcherSource: string;
 
   public constructor(
@@ -46,6 +47,7 @@ export class SshWatchManager {
     launchMode: boolean,
     signal?: AbortSignal,
   ): Promise<WatcherReadyEvent | StartManagerResult> {
+    if (signal?.aborted) return Promise.reject(new Error("watch 启动已取消"));
     if (this.active.has(config.watch_id)) throw new Error(`watch 已在运行: ${config.watch_id}`);
     const args = [...config.ssh_args, "--", config.host, "python3", "-"];
     const child = this.spawnProcess("ssh", args, {
@@ -60,6 +62,7 @@ export class SshWatchManager {
       intentionalClose: false,
     };
     this.active.set(config.watch_id, active);
+    this.ownership.set(config.watch_id, active);
 
     return new Promise<WatcherReadyEvent | StartManagerResult>((resolve, reject) => {
       let stdoutRest = "";
@@ -73,7 +76,8 @@ export class SshWatchManager {
         clearTimeout(timeout);
         active.intentionalClose = true;
         child.kill();
-        this.active.delete(config.watch_id);
+        this.deleteIfCurrent(active);
+        this.releaseOwnership(active);
         resolve({
           outcome: "started_unwatched",
           launched: active.launched,
@@ -89,7 +93,8 @@ export class SshWatchManager {
         clearTimeout(timeout);
         active.intentionalClose = true;
         child.kill();
-        this.active.delete(config.watch_id);
+        this.deleteIfCurrent(active);
+        this.releaseOwnership(active);
         reject(error);
       };
 
@@ -180,11 +185,12 @@ export class SshWatchManager {
 
       child.on("close", (code, closeSignal) => {
         clearTimeout(timeout);
-        this.active.delete(config.watch_id);
+        this.deleteIfCurrent(active);
         if (!settled && !active.ready) {
           const error = new Error(this.startupExitMessage(code, closeSignal, active.stderrTail));
           if (!resolveUnwatched(error)) {
             settled = true;
+            this.releaseOwnership(active);
             reject(error);
           }
           return;
@@ -236,6 +242,7 @@ export class SshWatchManager {
     active.intentionalClose = true;
     active.child.kill();
     this.active.delete(watchId);
+    this.releaseOwnership(active);
     return true;
   }
 
@@ -244,8 +251,10 @@ export class SshWatchManager {
     for (const active of this.active.values()) {
       active.intentionalClose = true;
       active.child.kill();
+      this.releaseOwnership(active);
     }
     this.active.clear();
+    this.ownership.clear();
   }
 
   /** Returns whether the current extension instance owns a live child. */
@@ -253,12 +262,28 @@ export class SshWatchManager {
     return this.active.has(watchId);
   }
 
+  /** Removes a watch only if this callback still owns the active map entry. */
+  private deleteIfCurrent(active: ActiveWatch): void {
+    if (this.active.get(active.config.watch_id) === active)
+      this.active.delete(active.config.watch_id);
+  }
+
+  /** Releases callback ownership only when this lifecycle still owns the watch ID. */
+  private releaseOwnership(active: ActiveWatch): void {
+    if (this.ownership.get(active.config.watch_id) === active)
+      this.ownership.delete(active.config.watch_id);
+  }
+
   /** Delivers exactly one terminal event, then ensures the SSH child is cleaned up. */
   private finishOnce(active: ActiveWatch, event: TerminalEvent): void {
     if (active.terminalHandled || active.intentionalClose) return;
     active.terminalHandled = true;
-    this.active.delete(active.config.watch_id);
-    setImmediate(() => this.onTerminal(active.config, event));
+    this.deleteIfCurrent(active);
+    setImmediate(() => {
+      if (this.ownership.get(active.config.watch_id) !== active) return;
+      this.ownership.delete(active.config.watch_id);
+      this.onTerminal(active.config, event);
+    });
     active.child.kill();
   }
 

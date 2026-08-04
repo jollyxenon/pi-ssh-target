@@ -2,7 +2,7 @@
 
 `pi-ssh-target` 是一个用于 Pi 的 SSH 进程监控插件。Agent 可以通过一次 `start` 调用启动远程非交互任务并立即建立进程树监控，也可以把已经运行任务的根 PID 交给 `watch`。任务结束、Watcher 中断或 SSH 连接异常关闭时，插件会通过 `steer` 唤醒原来的 Pi session。
 
-插件还会在一次 Agent run 完全结束后检查本轮工具调用。只有本地规则发现可能漏建监控的远程长任务时，才使用当前 Pi 模型的独立短上下文进行 Judge 判断；判断为需要监控或信息不足时，再唤醒正式 Agent 核实。
+插件还会在一次 Agent run 完全结束后创建审计快照，并在后台异步检查本轮是否漏建监控。审计不会阻塞下一轮问答，也不会向正式 Agent 上下文注入补救消息；只有 Judge 给出的 host、PID 和 SSH 参数能由工具证据验证时，extension 才会静默补建 Watcher。
 
 ## 运行环境
 
@@ -196,21 +196,82 @@ ssh <ssh_args...> -- <host> python3 -
 }
 ```
 
-`list` 只读取当前 Pi session 的生命周期记录，不连接远程主机，也不读取远程状态文件。默认分别返回最近更新的 20 个活跃 watch、20 个 `started_unwatched` 记录，以及终态时间最晚的 5 个 watch；数量可通过现有 limit 参数在 0–100 范围内覆盖。
+`list` 只读取当前 Pi session 的生命周期和后台审计记录，不连接远程主机，也不读取远程状态文件。默认分别返回最近更新的 20 个活跃 watch、20 个 `started_unwatched` 记录，以及终态时间最晚的 5 个 watch 和审计结果；数量可通过现有 limit 参数在 0–100 范围内覆盖。
 
 ## 自动遗漏审计
 
-扩展在 `agent_start` 到 `agent_settled` 之间收集有界工具结果摘要。初筛只针对具备远程上下文、可能启动 detached 长任务的调用，例如正式的 `nohup`、创建 detached tmux/screen session、`setsid`、后台 shell 和明确 PID 输出；查看 tmux/session 状态等只读命令会被排除。
+主动调用 `start/watch` 仍是首选流程。扩展同时在 `agent_start` 到 `agent_settled` 之间收集工具证据；`agent_settled` 只创建不可变快照并放入 session 内的串行后台队列，不等待 Judge 完成。用户可以立即开始下一轮问答。
 
-只有存在未被同一 host/PID Watcher 覆盖的候选时，扩展才调用 Judge LLM：
+默认策略是：
 
-- 默认复用当前 Pi session 的模型、provider 鉴权和环境。
-- 使用独立短上下文，不携带完整会话和工具定义。
-- 命令与输出会截断，并明确标记为不可信数据，不是用户指令。
-- Judge 返回 `no` 时静默结束；返回 `yes`、`uncertain`，或模型/鉴权/解析失败时，唤醒正式 Agent 核实。
-- 审计批次通过 session custom entry 去重，审计唤醒本身没有新启动候选时不会循环触发。
+- 先用本地规则筛选可能启动远程长任务的调用；没有候选时不调用 LLM。
+- 把当前有效分支经过 compaction 后的完整对话提交给本轮 Pi Agent 使用的模型。
+- 为完整上下文请求启用长期 prompt cache retention。
+- Judge 返回一个或多个结构化决策；只有 host、PID 和 `ssh_args` 能由原始工具证据精确验证时才补建 Watcher。
+- Judge 失败、信息不足、参数不可信或 Watcher 启动失败时，只写入 custom entry，不唤醒正式 Agent。
+- 自动补建的 Watcher 与主动 Watcher 一样，会在 `finish`、`interrupt` 或 `close` 时 steer 当前 session。
 
-Judge usage 会保存在审计 custom entry 中。当前 Pi 的事件 hook 没有把嵌套模型 usage 汇总进 footer totals 的入口，因此这部分用量不保证显示在 session 总计中。
+对 Bash 工具，自动补建只接受单一、未与本地 shell 管道或后续命令组合的 SSH 调用；远程命令必须以 `echo PID=$!` 明确结束，输出中也只能有一个 `PID=<正整数>`。双引号中的本地变量展开、命令替换、多条 PID 记录或其他歧义证据只会进入审计记录，不会启动 Watcher。
+
+自动重放的 `ssh_args` 仅允许端口、身份文件、ProxyJump 等连接参数和少量安全 `-o` 项；转发、ControlMaster、ProxyCommand、LocalCommand 等选项会被拒绝。扩展还会强制追加 `PermitLocalCommand=no` 和 `ClearAllForwardings=yes`。
+
+每个 session 的后台 Judge 串行执行，后续审计会再次检查当前 Watcher 覆盖，避免重复连接。session reload、切换、tree 导航或 shutdown 会取消或废弃旧审计结果。Pi 进程退出后，尚未完成的 Judge 不会跨进程继续运行。
+
+### 审计配置
+
+配置文件为：
+
+```text
+~/.pi/agent/pi-ssh-target.json
+```
+
+未创建配置文件时使用默认值：
+
+```json
+{
+  "audit": {
+    "judgmentMethod": "prefilter_then_llm",
+    "submission": "full_context",
+    "model": { "source": "pi_agent" },
+    "cacheEnabled": true
+  }
+}
+```
+
+可选值：
+
+| 字段 | 可选值 | 说明 |
+|---|---|---|
+| `judgmentMethod` | `prefilter_then_llm`, `direct_llm` | 先筛后交，或每轮直接交给 Judge |
+| `submission` | `full_context`, `current_exchange`, `ssh_tool_calls` | 完整有效分支、本轮问答或筛选命中的 SSH 工具记录 |
+| `model.source` | `pi_agent`, `independent` | 使用本轮 Pi 模型，或固定独立模型 |
+| `cacheEnabled` | boolean | 只在 `full_context` 模式读取；其他模式固定关闭 |
+
+`direct_llm` 不能与 `ssh_tool_calls` 组合，因为后者依赖本地筛选结果。配置严格校验，未知字段和无效组合会阻止 extension 加载，不会静默改成其他策略。
+
+独立模型示例：
+
+```json
+{
+  "audit": {
+    "judgmentMethod": "prefilter_then_llm",
+    "submission": "full_context",
+    "model": {
+      "source": "independent",
+      "provider": "anthropic",
+      "model": "claude-haiku-4-5",
+      "apiKeyEnv": "PI_SSH_TARGET_JUDGE_API_KEY"
+    },
+    "cacheEnabled": true
+  }
+}
+```
+
+独立模型仍使用 Pi model registry 中的 provider 和模型定义。`apiKeyEnv` 只保存环境变量名；未指定时使用 Pi 已配置的 provider 鉴权。找不到指定模型或鉴权失败时不会回退到正式 Agent 当前模型。
+
+`full_context` 会把当前有效分支中的用户消息、助手消息、工具调用和工具结果发送给所选 Judge provider；不会发送废弃分支、extension custom entries、正式 Agent 系统提示或工具 schema。工具输出和对话均被标记为不可信审计材料。若上下文超过模型窗口，审计副本会从最旧历史开始裁剪，不修改原 session。
+
+Judge usage 和真实 cache read/write 会保存在审计 custom entry 中。当前 Pi 的事件 hook 没有把这种后台嵌套模型 usage 汇总进 footer totals 的入口，因此这部分用量不保证显示在 session 总计中。
 
 ## Watcher 如何判断进程结束
 
@@ -292,7 +353,8 @@ pi.sendMessage(message, { triggerTurn: true, deliverAs: "steer" })
 
 - `start` 只支持非交互任务，不提供 TTY，stdin 固定为 `/dev/null`。
 - `start` 不解析 scheduler 作业 ID，也不把 `sbatch` 自动映射为执行节点 PID。
-- Judge 依赖当前模型可用；失败时会按 `uncertain` 唤醒正式 Agent，因此可能产生保守的额外核实 turn。
+- 后台 Judge 依赖所选模型可用；失败时只记录审计错误，不会唤醒正式 Agent。
+- 完整上下文审计会把当前有效对话发送给所选 provider，可能包含工具输出中的敏感信息。
 - 不提供 SSH 或 Watcher 自动重试。
 - 不补发 Pi 离线期间错过的事件。
 - 不提供反向隧道、HTTP listener、socket、token 或事件文件传输。

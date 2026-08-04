@@ -40,6 +40,28 @@ process.stdin.on("end", () => {
     else setInterval(() => {}, 1000);
     return;
   }
+  if (config.host === "ownership-race") {
+    send({ event: "ready" });
+    if (!config.resume) send(finishEvent(config));
+    else setInterval(() => {}, 1000);
+    return;
+  }
+  if (config.host === "tree-race") {
+    process.on("SIGTERM", () => setTimeout(() => process.exit(0), 80));
+    send({ event: "ready" });
+    setInterval(() => {}, 1000);
+    return;
+  }
+  if (config.host === "slow-ready") {
+    setTimeout(() => send({ event: "ready" }), 100);
+    setInterval(() => {}, 1000);
+    return;
+  }
+  if (config.host === "audit-fail") {
+    process.stderr.write("audit watcher failed");
+    process.exitCode = 8;
+    return;
+  }
   if (config.host === "no-ready") {
     setInterval(() => {}, 1000);
     return;

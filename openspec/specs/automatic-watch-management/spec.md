@@ -1,8 +1,10 @@
+> **后续变更说明：** 本文件中的遗漏审计 requirements 已由 `configure-background-watch-audit/specs/background-watch-audit/spec.md` 取代。当前行为不再通过审计消息唤醒正式 Agent，而是在后台异步判断并静默补建可验证的 Watcher。
+
 ## Purpose
 
 让 Pi Agent 更可靠地为远程 Linux 长任务建立进程树监控，并提供一次调用即可完成任务启动、PID 获取和 Watcher 登记的安全接口。
 
-## ADDED Requirements
+## Requirements
 
 ### Requirement: 强制提示 Agent 登记远程长任务
 系统 SHALL 在 `pi_ssh_target` 激活时明确要求 Agent：启动预计长期运行或脱离当前 SSH 命令的远程 Linux 任务后，必须在同一 Agent run 内登记 Watcher，或明确说明无法登记的原因。

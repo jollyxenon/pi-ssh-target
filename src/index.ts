@@ -1,22 +1,35 @@
 import { randomUUID } from "node:crypto";
 import { StringEnum } from "@earendil-works/pi-ai";
-import type { ExtensionAPI, ExtensionContext, ToolResultEvent } from "@earendil-works/pi-coding-agent";
+import type {
+  ExtensionAPI,
+  ExtensionContext,
+  ToolResultEvent,
+} from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import {
-  type AuditBatch,
   type AuditCandidate,
   type AuditEntryRecord,
-  buildAuditBatch,
+  type AuditEvidence,
+  type AuditSnapshot,
   candidateFromToolResult,
+  createAuditSnapshot,
+  evidenceFromToolResult,
   type JudgeResult,
-  judgeAuditBatch,
+  judgeAuditSnapshot,
   MAX_AUDIT_CANDIDATES,
-  uncoveredCandidates,
+  MAX_AUDIT_EVIDENCE,
+  messagesFromContextEntries,
+  shouldJudgeSnapshot,
+  validateAuditDecisionsDetailed,
   type WatchCoverage,
 } from "./audit.js";
 import {
+  type AuditConfig,
+  loadPiSshTargetConfig,
+  summarizeAuditConfig,
+} from "./audit-config.js";
+import {
   AUDIT_ENTRY_TYPE,
-  AUDIT_MESSAGE_TYPE,
   DEFAULT_ACTIVE_LIMIT,
   DEFAULT_TERMINAL_LIMIT,
   isTerminalStatus,
@@ -27,10 +40,11 @@ import {
   validateStartInput,
   validateWatchInput,
 } from "./constants.js";
-import { buildAuditRemediationPrompt, buildStartedUnwatchedPrompt, buildTerminalPrompt } from "./prompts.js";
+import { buildStartedUnwatchedPrompt, buildTerminalPrompt } from "./prompts.js";
 import { reconstructWatchStates } from "./session-state.js";
 import { SshWatchManager, type TerminalEvent } from "./ssh-watch-manager.js";
 import type {
+  AuditSummary,
   CancelInput,
   ListInput,
   StartInput,
@@ -48,7 +62,9 @@ import type {
 const ToolParameters = Type.Object({
   action: StringEnum(["watch", "start", "cancel", "list"] as const),
   host: Type.Optional(Type.String({ description: "SSH destination" })),
-  pid: Type.Optional(Type.Integer({ minimum: 1, description: "Remote root PID" })),
+  pid: Type.Optional(
+    Type.Integer({ minimum: 1, description: "Remote root PID" }),
+  ),
   job_id: Type.Optional(Type.String()),
   ssh_args: Type.Optional(Type.Array(Type.String())),
   interval_seconds: Type.Optional(Type.Number({ exclusiveMinimum: 0 })),
@@ -63,8 +79,12 @@ const ToolParameters = Type.Object({
   stdout_path: Type.Optional(Type.String()),
   stderr_path: Type.Optional(Type.String()),
   watch_id: Type.Optional(Type.String()),
-  active_limit: Type.Optional(Type.Integer({ minimum: 0, maximum: MAX_LIST_LIMIT })),
-  terminal_limit: Type.Optional(Type.Integer({ minimum: 0, maximum: MAX_LIST_LIMIT })),
+  active_limit: Type.Optional(
+    Type.Integer({ minimum: 0, maximum: MAX_LIST_LIMIT }),
+  ),
+  terminal_limit: Type.Optional(
+    Type.Integer({ minimum: 0, maximum: MAX_LIST_LIMIT }),
+  ),
 });
 
 type PiToolResult = {
@@ -73,19 +93,39 @@ type PiToolResult = {
 };
 
 export interface PiSshTargetDependencies {
-  judge: (ctx: ExtensionContext, batch: AuditBatch) => Promise<JudgeResult>;
+  judge?: (
+    ctx: ExtensionContext,
+    snapshot: AuditSnapshot,
+    config: AuditConfig,
+    signal?: AbortSignal,
+  ) => Promise<JudgeResult>;
+  auditConfig?: AuditConfig;
 }
+
+type QueuedAudit = {
+  snapshot: AuditSnapshot;
+  context: ExtensionContext;
+};
 
 /** Registers the pi_ssh_target Agent tool and session lifecycle hooks. */
 export default function piSshTarget(
   pi: ExtensionAPI,
-  dependencies: PiSshTargetDependencies = { judge: judgeAuditBatch },
+  dependencies: PiSshTargetDependencies = {},
 ): void {
+  const auditConfig = dependencies.auditConfig ?? loadPiSshTargetConfig().audit;
+  const judge = dependencies.judge ?? judgeAuditSnapshot;
   let states = new Map<string, WatchState>();
+  let auditRecords: AuditEntryRecord[] = [];
   let sessionContext: ExtensionContext | undefined;
+  let runEvidence: AuditEvidence[] = [];
   let runCandidates: AuditCandidate[] = [];
   let runCoverage: WatchCoverage[] = [];
   let auditRunActive = false;
+  let auditGeneration = 0;
+  let auditWorkerActive = false;
+  let auditDisposed = false;
+  let auditAbort: AbortController | undefined;
+  const auditQueue: QueuedAudit[] = [];
   const auditedHashes = new Set<string>();
   const manager = new SshWatchManager(handleTerminal);
 
@@ -96,6 +136,7 @@ export default function piSshTarget(
       config: record.config,
       status: record.kind,
       updated_at: record.at,
+      ...(record.origin === undefined ? {} : { origin: record.origin }),
       ...(record.event === undefined ? {} : { event: record.event }),
       ...(record.error === undefined ? {} : { error: record.error }),
     });
@@ -111,6 +152,7 @@ export default function piSshTarget(
       watch_id: config.watch_id,
       at: event.observed_at,
       config,
+      ...(current.origin === undefined ? {} : { origin: current.origin }),
       event,
     };
     persist(record);
@@ -140,14 +182,18 @@ export default function piSshTarget(
       state_file: null,
       exit_code: null,
       signal: null,
-      stderr_tail: error instanceof Error ? error.message.slice(-2000) : String(error).slice(-2000),
+      stderr_tail:
+        error instanceof Error
+          ? error.message.slice(-2000)
+          : String(error).slice(-2000),
     };
     handleTerminal(config, event);
   }
 
-  /** Restarts only branch states whose last lifecycle record is started. */
+  /** Restarts branch watches and restores background audit dedupe records. */
   async function restoreStarted(ctx: ExtensionContext): Promise<void> {
     states = reconstructWatchStates(ctx.sessionManager.getBranch());
+    auditRecords = [];
     auditedHashes.clear();
     for (const raw of ctx.sessionManager.getBranch()) {
       if (!raw || typeof raw !== "object") continue;
@@ -158,40 +204,75 @@ export default function piSshTarget(
       };
       if (
         entry.type !== "custom" ||
-        entry.customType !== AUDIT_ENTRY_TYPE ||
         !entry.data ||
         typeof entry.data !== "object"
       )
         continue;
-      const hash = (entry.data as { hash?: unknown }).hash;
-      if (typeof hash === "string") auditedHashes.add(hash);
+      if (entry.customType === AUDIT_ENTRY_TYPE) {
+        const record = entry.data as Partial<AuditEntryRecord>;
+        if (
+          record.version === 2 &&
+          typeof record.hash === "string" &&
+          typeof record.status === "string"
+        ) {
+          auditRecords.push(record as AuditEntryRecord);
+          auditedHashes.add(record.hash);
+        }
+      }
     }
-    const pending = [...states.values()].filter((state) => state.status === "started");
+    const restoreGeneration = auditGeneration;
+    const restoreSessionId = ctx.sessionManager.getSessionId();
+    const pending = [...states.values()].filter(
+      (state) => state.status === "started",
+    );
     for (const state of pending) {
       const config = { ...state.config, resume: true };
-      void manager.start(config).catch((error: unknown) => handleRestoreFailure(config, error));
+      void manager.start(config).catch((error: unknown) => {
+        if (
+          auditDisposed ||
+          auditGeneration !== restoreGeneration ||
+          sessionContext?.sessionManager.getSessionId() !== restoreSessionId
+        )
+          return;
+        handleRestoreFailure(config, error);
+      });
     }
   }
 
+  /** Invalidates queued audit work for a replaced or closed session runtime. */
+  function invalidateAuditRuntime(): void {
+    auditGeneration += 1;
+    auditAbort?.abort();
+    auditAbort = undefined;
+    auditQueue.length = 0;
+  }
+
   pi.on("session_start", async (_event, ctx) => {
+    auditDisposed = false;
+    invalidateAuditRuntime();
     sessionContext = ctx;
     manager.closeAll();
     await restoreStarted(ctx);
   });
 
   pi.on("session_tree", async (_event, ctx) => {
+    auditDisposed = false;
+    invalidateAuditRuntime();
     sessionContext = ctx;
     manager.closeAll();
     await restoreStarted(ctx);
   });
 
   pi.on("session_shutdown", async () => {
+    auditDisposed = true;
+    invalidateAuditRuntime();
     manager.closeAll();
   });
 
   pi.on("agent_start", async () => {
     if (auditRunActive) return;
     auditRunActive = true;
+    runEvidence = [];
     runCandidates = [];
     runCoverage = [];
   });
@@ -199,62 +280,294 @@ export default function piSshTarget(
   pi.on("tool_result", async (event) => {
     recordCoverage(event);
     if (event.toolName === "pi_ssh_target") return;
+    const evidence = evidenceFromToolResult(event);
+    if (!evidence) return;
     const candidate = candidateFromToolResult(event);
-    if (candidate && runCandidates.length < MAX_AUDIT_CANDIDATES) runCandidates.push(candidate);
+    if (!candidate) {
+      if (runEvidence.length < MAX_AUDIT_EVIDENCE) runEvidence.push(evidence);
+      return;
+    }
+    if (runCandidates.length >= MAX_AUDIT_CANDIDATES) return;
+    if (runEvidence.length >= MAX_AUDIT_EVIDENCE) {
+      const candidateIds = new Set(
+        runCandidates.map((item) => item.tool_call_id),
+      );
+      const replaceIndex = runEvidence.findIndex(
+        (item) => !candidateIds.has(item.tool_call_id),
+      );
+      if (replaceIndex < 0) return;
+      runEvidence.splice(replaceIndex, 1);
+    }
+    runEvidence.push(evidence);
+    runCandidates.push(candidate);
   });
 
   pi.on("agent_settled", async (_event, ctx) => {
     auditRunActive = false;
-    const candidates = uncoveredCandidates(runCandidates, runCoverage);
+    const evidence = runEvidence;
+    const candidates = runCandidates;
+    const coverage = runCoverage;
+    runEvidence = [];
     runCandidates = [];
     runCoverage = [];
-    const batch = buildAuditBatch(candidates);
-    if (!batch || auditedHashes.has(batch.hash)) return;
-    auditedHashes.add(batch.hash);
-    appendAudit({
-      version: 1,
-      hash: batch.hash,
-      at: new Date().toISOString(),
-      decision: "pending",
-      candidate_count: batch.candidates.length,
-    });
-    const judge = await dependencies.judge(ctx, batch);
-    appendAudit({
-      version: 1,
-      hash: batch.hash,
-      at: new Date().toISOString(),
-      decision: judge.decision,
-      candidate_count: batch.candidates.length,
-      ...(judge.usage === undefined ? {} : { usage: judge.usage }),
-      ...(judge.error === undefined ? {} : { error: judge.error.slice(-2000) }),
-    });
-    if (judge.decision === "no") return;
-    pi.sendMessage(
-      {
-        customType: AUDIT_MESSAGE_TYPE,
-        content: buildAuditRemediationPrompt(batch.candidates, judge),
-        display: false,
-        details: { hash: batch.hash, decision: judge.decision },
-      },
-      { triggerTurn: true, deliverAs: "followUp" },
+    const fullContext = messagesFromContextEntries(
+      ctx.sessionManager.buildContextEntries(),
     );
+    const snapshot = createAuditSnapshot({
+      sessionId: ctx.sessionManager.getSessionId(),
+      leafId: ctx.sessionManager.getLeafId(),
+      generation: auditGeneration,
+      model: ctx.model
+        ? { provider: ctx.model.provider, id: ctx.model.id }
+        : null,
+      fullContext,
+      evidence,
+      candidates,
+      coverage: [
+        ...coverage,
+        ...[...states.values()]
+          .filter((state) => state.status !== "started_unwatched")
+          .map((state) => ({ host: state.config.host, pid: state.config.pid })),
+      ],
+    });
+    if (
+      !shouldJudgeSnapshot(snapshot, auditConfig) ||
+      auditedHashes.has(snapshot.hash)
+    )
+      return;
+    auditedHashes.add(snapshot.hash);
+    appendAudit(auditRecord(snapshot, "queued"));
+    auditQueue.push({ snapshot, context: ctx });
+    void runAuditQueue().catch(() => {
+      // Per-item failures are recorded inside the worker; this only contains unexpected defects.
+    });
   });
 
-  /** Best-effort persistence must never block Judge or remediation. */
+  /** Runs queued Judge requests serially without blocking the Agent lifecycle. */
+  async function runAuditQueue(): Promise<void> {
+    if (auditWorkerActive) return;
+    auditWorkerActive = true;
+    try {
+      while (auditQueue.length > 0) {
+        const queued = auditQueue.shift();
+        if (!queued) continue;
+        if (!isAuditSnapshotCurrent(queued.snapshot)) {
+          appendAudit(auditRecord(queued.snapshot, "discarded"));
+          continue;
+        }
+        appendAudit(auditRecord(queued.snapshot, "running"));
+        const controller = new AbortController();
+        auditAbort = controller;
+        let result: JudgeResult;
+        try {
+          result = await judge(
+            queued.context,
+            queued.snapshot,
+            auditConfig,
+            controller.signal,
+          );
+        } catch (error) {
+          auditAbort = undefined;
+          appendAudit(
+            auditRecord(queued.snapshot, "failed", {
+              error: boundedError(error),
+            }),
+          );
+          continue;
+        }
+        auditAbort = undefined;
+        if (!isAuditSnapshotCurrent(queued.snapshot)) {
+          appendAudit(
+            auditRecord(
+              queued.snapshot,
+              "discarded",
+              result.usage === undefined ? {} : { usage: result.usage },
+            ),
+          );
+          continue;
+        }
+        const watchIds: string[] = [];
+        const errors: string[] = [];
+        const validation = validateAuditDecisionsDetailed(
+          result,
+          queued.snapshot.evidence,
+        );
+        const validatedSuggestions = validation.accepted;
+        if (validation.rejected.length > 0) {
+          errors.push(
+            `Watcher 建议校验失败: ${validation.rejected.join(", ")}`,
+          );
+        }
+        for (const suggestion of validatedSuggestions) {
+          if (
+            controller.signal.aborted ||
+            !isAuditSnapshotCurrent(queued.snapshot)
+          )
+            break;
+          if (hasWatchCoverage(suggestion.host, suggestion.pid)) continue;
+          const input: WatchInput = {
+            action: "watch",
+            host: suggestion.host,
+            pid: suggestion.pid,
+            job_id: suggestion.job_id,
+            ssh_args: [
+              ...suggestion.ssh_args,
+              "-o",
+              "PermitLocalCommand=no",
+              "-o",
+              "ClearAllForwardings=yes",
+            ],
+          };
+          const validationError = validateWatchInput(input);
+          if (validationError) {
+            errors.push(validationError);
+            continue;
+          }
+          const config = normalizeWatchConfig(
+            input,
+            randomUUID(),
+            queued.snapshot.session_id,
+          );
+          try {
+            const ready = await manager.start(config, controller.signal);
+            if (
+              controller.signal.aborted ||
+              !isAuditSnapshotCurrent(queued.snapshot)
+            ) {
+              manager.cancel(config.watch_id);
+              break;
+            }
+            if (hasWatchCoverage(suggestion.host, suggestion.pid)) {
+              manager.cancel(config.watch_id);
+              continue;
+            }
+            try {
+              persist({
+                version: 1,
+                kind: "started",
+                watch_id: config.watch_id,
+                at: ready.observed_at,
+                config,
+                origin: "audit",
+              });
+            } catch (error) {
+              manager.cancel(config.watch_id);
+              throw error;
+            }
+            watchIds.push(config.watch_id);
+          } catch (error) {
+            errors.push(boundedError(error));
+          }
+        }
+        const counts = countDecisions(result);
+        const error = [result.error, ...errors]
+          .filter((item): item is string => !!item)
+          .join("\n");
+        appendAudit(
+          auditRecord(queued.snapshot, error ? "failed" : "completed", {
+            decision_counts: counts,
+            watch_ids: watchIds,
+            ...(result.usage === undefined ? {} : { usage: result.usage }),
+            ...(error ? { error: boundedError(error) } : {}),
+          }),
+        );
+      }
+    } finally {
+      auditAbort = undefined;
+      auditWorkerActive = false;
+      if (auditQueue.length > 0 && !auditDisposed) {
+        void runAuditQueue().catch(() => {
+          // Per-item failures are recorded inside the worker; this only contains unexpected defects.
+        });
+      }
+    }
+  }
+
+  /** Best-effort persistence never blocks Judge, queue progress, or Watcher recovery. */
   function appendAudit(record: AuditEntryRecord): void {
+    auditRecords.push(record);
     try {
       pi.appendEntry(AUDIT_ENTRY_TYPE, record);
     } catch {
-      // In-memory hash dedupe remains active for this extension instance.
+      // In-memory records and hash dedupe remain active for this extension instance.
     }
+  }
+
+  /** Checks whether a queued snapshot can still mutate this session branch. */
+  function isAuditSnapshotCurrent(snapshot: AuditSnapshot): boolean {
+    if (auditDisposed || snapshot.generation !== auditGeneration) return false;
+    if (
+      !sessionContext ||
+      sessionContext.sessionManager.getSessionId() !== snapshot.session_id
+    )
+      return false;
+    if (snapshot.leaf_id === null) return true;
+    return sessionContext.sessionManager
+      .getBranch()
+      .some((entry) => entry.id === snapshot.leaf_id);
+  }
+
+  /** Treats an existing terminal or active watch as coverage for a remote PID. */
+  function hasWatchCoverage(host: string, pid: number): boolean {
+    return [...states.values()].some(
+      (state) =>
+        state.config.host === host &&
+        state.config.pid === pid &&
+        state.status !== "started_unwatched",
+    );
+  }
+
+  /** Creates a bounded audit lifecycle record. */
+  function auditRecord(
+    snapshot: AuditSnapshot,
+    status: AuditEntryRecord["status"],
+    extra: Partial<AuditEntryRecord> = {},
+  ): AuditEntryRecord {
+    return {
+      version: 2,
+      hash: snapshot.hash,
+      session_id: snapshot.session_id,
+      leaf_id: snapshot.leaf_id,
+      at: new Date().toISOString(),
+      status,
+      config: summarizeAuditConfig(auditConfig),
+      candidate_count: snapshot.candidates.length,
+      evidence_count: snapshot.evidence.length,
+      ...extra,
+    };
+  }
+
+  /** Counts the bounded Judge decisions for compact persistence. */
+  function countDecisions(
+    result: JudgeResult,
+  ): Record<"watch" | "ignore" | "insufficient", number> {
+    const counts = { watch: 0, ignore: 0, insufficient: 0 };
+    for (const decision of result.decisions) counts[decision.action] += 1;
+    return counts;
+  }
+
+  /** Converts an unknown background error into a bounded string. */
+  function boundedError(error: unknown): string {
+    return (error instanceof Error ? error.message : String(error)).slice(
+      -2000,
+    );
   }
 
   /** Records successful watch coverage from finalized custom tool results. */
   function recordCoverage(event: ToolResultEvent): void {
-    if (event.toolName !== "pi_ssh_target" || event.isError || !event.details || typeof event.details !== "object")
+    if (
+      event.toolName !== "pi_ssh_target" ||
+      event.isError ||
+      !event.details ||
+      typeof event.details !== "object"
+    )
       return;
     const details = event.details as ToolDetails;
-    if ((details.action !== "watch" && details.action !== "start") || details.error) return;
+    if (
+      (details.action !== "watch" && details.action !== "start") ||
+      details.error
+    )
+      return;
     const watch = details.watch;
     if (!watch || typeof watch !== "object") return;
     if ("config" in watch) {
@@ -269,7 +582,8 @@ export default function piSshTarget(
     label: "Pi SSH Target",
     description:
       "Start, watch, cancel, or list remote Linux process-tree monitors over independent background SSH connections.",
-    promptSnippet: "Start and monitor remote Linux process trees, then steer Pi on terminal events",
+    promptSnippet:
+      "Start and monitor remote Linux process trees, then steer Pi on terminal events",
     promptGuidelines: [
       "Whenever you start a remote Linux task expected to run for a long time or detach from its SSH command, use pi_ssh_target start when possible; otherwise capture its stable root PID and call pi_ssh_target watch in the same agent run before finishing.",
       "Do not finish a run with an unmonitored remote long task unless the user declined monitoring, the task already ended, or no stable PID can be obtained; state that reason explicitly.",
@@ -287,11 +601,18 @@ export default function piSshTarget(
   });
 
   /** Validates and starts one independent watch, persisting only after ready. */
-  async function executeWatch(input: WatchInput, signal?: AbortSignal): Promise<PiToolResult> {
+  async function executeWatch(
+    input: WatchInput,
+    signal?: AbortSignal,
+  ): Promise<PiToolResult> {
     const missing = requireWatchFields(input);
     const error = missing ?? validateWatchInput(input);
     if (error) return errorResult("watch", error);
-    const config = normalizeWatchConfig(input, randomUUID(), currentSessionId());
+    const config = normalizeWatchConfig(
+      input,
+      randomUUID(),
+      currentSessionId(),
+    );
     try {
       const ready = await manager.start(config, signal);
       const record: WatchLifecycleRecord = {
@@ -315,27 +636,45 @@ export default function piSshTarget(
         },
       };
     } catch (startError) {
-      return errorResult("watch", startError instanceof Error ? startError.message : String(startError));
+      return errorResult(
+        "watch",
+        startError instanceof Error ? startError.message : String(startError),
+      );
     }
   }
 
   /** Starts a detached task and records watched or partial-success outcome. */
-  async function executeStart(input: StartInput, signal?: AbortSignal): Promise<PiToolResult> {
+  async function executeStart(
+    input: StartInput,
+    signal?: AbortSignal,
+  ): Promise<PiToolResult> {
     const missing = requireStartFields(input);
     const error = missing ?? validateStartInput(input);
     if (error) return startErrorResult(error);
-    const config = normalizeWatchConfig(input, randomUUID(), currentSessionId());
+    const config = normalizeWatchConfig(
+      input,
+      randomUUID(),
+      currentSessionId(),
+    );
     let result: StartManagerResult;
     try {
       result = await manager.startLaunch(config, signal);
     } catch (startError) {
-      return startErrorResult(startError instanceof Error ? startError.message : String(startError));
+      return startErrorResult(
+        startError instanceof Error ? startError.message : String(startError),
+      );
     }
 
     config.pid = result.launched.root_pid;
     config.stdout_path = result.launched.stdout_path;
     config.stderr_path = result.launched.stderr_path;
-    config.log_paths = [...new Set([...config.log_paths, result.launched.stdout_path, result.launched.stderr_path])];
+    config.log_paths = [
+      ...new Set([
+        ...config.log_paths,
+        result.launched.stdout_path,
+        result.launched.stderr_path,
+      ]),
+    ];
     const launch = launchSummary(config);
     stripLaunchFields(config);
 
@@ -372,7 +711,12 @@ export default function piSshTarget(
         error: result.error,
       });
       sendStartedUnwatched(config, result.error);
-      return startedUnwatchedResult(config, launch, result.error, states.get(config.watch_id));
+      return startedUnwatchedResult(
+        config,
+        launch,
+        result.error,
+        states.get(config.watch_id),
+      );
     } catch (localError) {
       manager.cancel(config.watch_id);
       const message = `任务已启动，但本地 Watcher 状态处理失败: ${
@@ -389,7 +733,12 @@ export default function piSshTarget(
       } catch {
         // Tool result still reports the live task when session messaging is unavailable.
       }
-      return startedUnwatchedResult(config, launch, message, states.get(config.watch_id));
+      return startedUnwatchedResult(
+        config,
+        launch,
+        message,
+        states.get(config.watch_id),
+      );
     }
   }
 
@@ -411,7 +760,10 @@ export default function piSshTarget(
     if (!input.watch_id) return errorResult("cancel", "watch_id 不能为空");
     const state = states.get(input.watch_id);
     if (state?.status !== "started" || !manager.cancel(input.watch_id)) {
-      return errorResult("cancel", `watch 不存在、已终止或当前不可取消: ${input.watch_id}`);
+      return errorResult(
+        "cancel",
+        `watch 不存在、已终止或当前不可取消: ${input.watch_id}`,
+      );
     }
     const record: WatchLifecycleRecord = {
       version: 1,
@@ -437,7 +789,9 @@ export default function piSshTarget(
     if (!validListLimit(activeLimit) || !validListLimit(terminalLimit)) {
       return errorResult("list", `list 数量必须是 0-${MAX_LIST_LIMIT} 的整数`);
     }
-    const ordered = [...states.values()].sort((left, right) => right.updated_at.localeCompare(left.updated_at));
+    const ordered = [...states.values()].sort((left, right) =>
+      right.updated_at.localeCompare(left.updated_at),
+    );
     const active = ordered
       .filter((state) => state.status === "started")
       .slice(0, activeLimit)
@@ -450,18 +804,61 @@ export default function piSshTarget(
       .filter((state) => isTerminalStatus(state.status))
       .slice(0, terminalLimit)
       .map(summarize);
+    const audits = latestAuditSummaries(terminalLimit);
     const lines = [
       `active: ${active.length}`,
-      ...active.map((state) => `- ${state.watch_id} ${state.status} ${state.host} PID ${state.pid} ${state.job_id}`),
+      ...active.map(
+        (state) =>
+          `- ${state.watch_id} ${state.status} ${state.host} PID ${state.pid} ${state.job_id}`,
+      ),
       `unwatched: ${unwatched.length}`,
-      ...unwatched.map((state) => `- ${state.watch_id} ${state.status} ${state.host} PID ${state.pid} ${state.job_id}`),
+      ...unwatched.map(
+        (state) =>
+          `- ${state.watch_id} ${state.status} ${state.host} PID ${state.pid} ${state.job_id}`,
+      ),
       `terminal: ${terminal.length}`,
-      ...terminal.map((state) => `- ${state.watch_id} ${state.status} ${state.host} PID ${state.pid} ${state.job_id}`),
+      ...terminal.map(
+        (state) =>
+          `- ${state.watch_id} ${state.status} ${state.host} PID ${state.pid} ${state.job_id}`,
+      ),
+      `audits: ${audits.length}`,
+      ...audits.map(
+        (audit) =>
+          `- ${audit.hash.slice(0, 12)} ${audit.status} watches=${audit.watch_ids.length}`,
+      ),
     ];
     return {
       content: [{ type: "text", text: lines.join("\n") }],
-      details: { action: "list", active, unwatched, terminal },
+      details: { action: "list", active, unwatched, terminal, audits },
     };
+  }
+
+  /** Returns latest terminal audit outcomes without conversation or command content. */
+  function latestAuditSummaries(limit: number): AuditSummary[] {
+    const latestByHash = new Map<string, AuditEntryRecord>();
+    for (const record of auditRecords) latestByHash.set(record.hash, record);
+    return [...latestByHash.values()]
+      .filter(
+        (
+          record,
+        ): record is AuditEntryRecord & {
+          status: "completed" | "failed" | "discarded";
+        } =>
+          record.status === "completed" ||
+          record.status === "failed" ||
+          record.status === "discarded",
+      )
+      .sort((left, right) => right.at.localeCompare(left.at))
+      .slice(0, limit)
+      .map((record) => ({
+        hash: record.hash,
+        status: record.status,
+        at: record.at,
+        candidate_count: record.candidate_count,
+        evidence_count: record.evidence_count,
+        watch_ids: [...(record.watch_ids ?? [])],
+        ...(record.error === undefined ? {} : { error: record.error }),
+      }));
   }
 
   /** Returns current durable session id and rejects ephemeral sessions. */
@@ -538,6 +935,7 @@ function summarize(state: WatchState): WatchSummary {
     pid: state.config.pid,
     job_id: state.config.job_id,
     updated_at: state.updated_at,
+    ...(state.origin === undefined ? {} : { origin: state.origin }),
     ...(state.event === undefined
       ? {}
       : {
@@ -549,7 +947,9 @@ function summarize(state: WatchState): WatchSummary {
 }
 
 /** Returns launch metadata without environment values or note text. */
-function launchSummary(config: WatchConfig): NonNullable<ToolDetails["launch"]> {
+function launchSummary(
+  config: WatchConfig,
+): NonNullable<ToolDetails["launch"]> {
   if (!config.command || !config.stdout_path || !config.stderr_path) {
     throw new Error(`launch 元数据不完整: ${config.watch_id}`);
   }
@@ -574,7 +974,10 @@ function stripLaunchFields(config: WatchConfig): void {
 }
 
 /** Returns a persisted state or fails loudly on an internal invariant violation. */
-function requiredState(states: Map<string, WatchState>, watchId: string): WatchState {
+function requiredState(
+  states: Map<string, WatchState>,
+  watchId: string,
+): WatchState {
   const state = states.get(watchId);
   if (!state) throw new Error(`watch 状态未持久化: ${watchId}`);
   return state;

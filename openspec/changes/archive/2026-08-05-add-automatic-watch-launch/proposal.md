@@ -1,3 +1,5 @@
+> **后续变更说明：** `configure-background-watch-audit` 已取代本文的遗漏审计部分。当前实现保留主动 `start/watch`，但在 `agent_settled` 后完全异步调用可配置 Judge，并由 extension 静默补建 Watcher；不再使用短上下文固定策略，也不再唤醒正式 Agent 补建。本文其余远程启动设计仍然有效。
+
 ## Why
 
 Agent 启动远程长任务后仍可能漏调 `pi_ssh_target watch`，使任务结束时无法自动恢复原 Pi session。仅靠提示词不能稳定避免遗漏，同时现有两步式“启动任务、获取 PID、再登记 Watcher”容易在 Agent 收尾时被跳过。

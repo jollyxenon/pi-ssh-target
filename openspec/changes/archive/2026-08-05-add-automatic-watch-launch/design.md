@@ -1,3 +1,5 @@
+> **后续变更说明：** `configure-background-watch-audit` 已取代本文关于同步 Judge、独立短上下文和审计 follow-up 的决策。当前审计使用完全异步 session 队列、可配置提交内容和模型，并在证据可验证时由 extension 直接补建 Watcher。
+
 ## Context
 
 现有扩展只提供 `watch`、`cancel`、`list`，Agent 必须先通过其他工具启动任务，再主动提交 host 和 PID。扩展已经使用独立 SSH 子进程运行远程 Python Watcher，并通过 session custom entries 恢复 Watcher 生命周期。新设计需要在不破坏现有 action 和恢复行为的前提下，加入提示强化、Agent run 审计、独立模型判断和结构化远程启动。
