@@ -84,4 +84,61 @@ describe.sequential("SshWatchManager", () => {
     expect(terminals).toEqual([]);
     expect(manager.has("watch-1")).toBe(false);
   });
+
+  it("never relaunches a persisted start config through the watch-only path", async () => {
+    const manager = new SshWatchManager(() => {}, undefined, "# fake watcher");
+    const persistedStartConfig = {
+      ...config("hang"),
+      command: "python3",
+      args: ["train.py"],
+      stdout_path: "/tmp/existing.stdout.log",
+      stderr_path: "/tmp/existing.stderr.log",
+      resume: true,
+    };
+    const ready = await manager.start(persistedStartConfig);
+    expect(ready.root_pid).toBe(123);
+    manager.closeAll();
+  });
+
+  it("starts a remote task and returns launched metadata after ready", async () => {
+    const manager = new SshWatchManager(() => {}, undefined, "# fake watcher");
+    const launchConfig = {
+      ...config("start-hang"),
+      pid: 0,
+      command: "python3",
+      args: ["train.py"],
+    };
+    const result = await manager.startLaunch(launchConfig);
+    expect(result.outcome).toBe("started_and_watched");
+    expect(result.launched.root_pid).toBe(456);
+    expect(result.launched.stdout_path).toContain(".stdout.log");
+    manager.closeAll();
+  });
+
+  it("returns started_unwatched after launch timeout without terminal callback", async () => {
+    const terminals: TerminalEvent[] = [];
+    const manager = new SshWatchManager((_config, event) => terminals.push(event), undefined, "# fake watcher");
+    const launchConfig = {
+      ...config("start-no-ready"),
+      pid: 0,
+      command: "python3",
+      args: ["train.py"],
+    };
+    const result = await manager.startLaunch(launchConfig);
+    expect(result.outcome).toBe("started_unwatched");
+    expect(result.launched.root_pid).toBe(456);
+    await delay(30);
+    expect(terminals).toEqual([]);
+  });
+
+  it("rejects launch failures before a PID is reported", async () => {
+    const manager = new SshWatchManager(() => {}, undefined, "# fake watcher");
+    const launchConfig = {
+      ...config("launch-fail"),
+      pid: 0,
+      command: "missing",
+      args: [],
+    };
+    await expect(manager.startLaunch(launchConfig)).rejects.toThrow("command not found");
+  });
 });

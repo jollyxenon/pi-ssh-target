@@ -22,6 +22,24 @@ process.stdin.on("end", () => {
     state_file: `/tmp/pi-ssh-target-test/${config.watch_id}.json`,
   };
   const send = (event) => process.stdout.write(prefix + JSON.stringify({ ...base, ...event }) + "\n");
+  if (config.command) {
+    const stdoutPath = `/tmp/pi-ssh-target-test/${config.watch_id}.stdout.log`;
+    const stderrPath = `/tmp/pi-ssh-target-test/${config.watch_id}.stderr.log`;
+    if (config.host === "launch-fail") {
+      send({ event: "interrupt", error_code: "launch_failed", error: "command not found" });
+      return;
+    }
+    base.root_pid = 456;
+    send({ event: "launched", stdout_path: stdoutPath, stderr_path: stderrPath });
+    if (config.host === "start-no-ready") {
+      setInterval(() => {}, 1000);
+      return;
+    }
+    send({ event: "ready", stdout_path: stdoutPath, stderr_path: stderrPath });
+    if (config.host === "start-finish") send({ event: "finish" });
+    else setInterval(() => {}, 1000);
+    return;
+  }
   if (config.host === "no-ready") {
     setInterval(() => {}, 1000);
     return;

@@ -1,8 +1,8 @@
 # pi-ssh-target
 
-`pi-ssh-target` 是一个用于 Pi 的 SSH 进程监控插件。Agent 在远程 Linux 主机上启动长任务后，可以把任务的根 PID 交给插件。插件会在后台跟踪这棵进程树；任务结束、Watcher 中断或 SSH 连接异常关闭时，它会通过 `steer` 唤醒原来的 Pi session。
+`pi-ssh-target` 是一个用于 Pi 的 SSH 进程监控插件。Agent 可以通过一次 `start` 调用启动远程非交互任务并立即建立进程树监控，也可以把已经运行任务的根 PID 交给 `watch`。任务结束、Watcher 中断或 SSH 连接异常关闭时，插件会通过 `steer` 唤醒原来的 Pi session。
 
-插件只做两件事：监控进程树，发送通知。它不会替 Agent 启动任务、判断任务是否成功，也不会主动读取远程日志和产物。
+插件还会在一次 Agent run 完全结束后检查本轮工具调用。只有本地规则发现可能漏建监控的远程长任务时，才使用当前 Pi 模型的独立短上下文进行 Judge 判断；判断为需要监控或信息不足时，再唤醒正式 Agent 核实。
 
 ## 运行环境
 
@@ -56,7 +56,70 @@ pi -e .
 
 ## 工具用法
 
-Package 注册一个工具：`pi_ssh_target`。工具有三种 action：`watch`、`cancel`、`list`。
+Package 注册一个工具：`pi_ssh_target`。工具有四种 action：`start`、`watch`、`cancel`、`list`。
+
+### `start`
+
+`start` 在一次工具调用中完成远程任务启动、PID 获取和 Watcher 建立。它只支持非交互任务，不分配 TTY，stdin 使用 `/dev/null`。
+
+必填参数：
+
+| 参数 | 类型 | 说明 |
+|---|---|---|
+| `action` | `"start"` | 固定值 |
+| `host` | string | SSH destination |
+| `job_id` | string | 任务标识，最多 200 字符 |
+| `command` | string | 远程可执行程序或脚本解释器 |
+| `args` | string[] | 独立 argv 参数数组，不经过隐式 shell |
+
+可选启动参数：
+
+| 参数 | 说明 |
+|---|---|
+| `cwd` | 远程工作目录 |
+| `env` | 合并到远程进程环境的字符串键值对 |
+| `stdout_path` | stdout 日志路径 |
+| `stderr_path` | stderr 日志路径 |
+
+`ssh_args`、`interval_seconds`、`startup_timeout_seconds`、`result_paths`、`log_paths` 和 `note` 与 `watch` 相同。
+
+示例：
+
+```json
+{
+  "action": "start",
+  "host": "gpu01",
+  "job_id": "train-exp-17",
+  "command": "python3",
+  "args": ["/data/train.py", "--epochs", "100"],
+  "cwd": "/data/project",
+  "env": { "CUDA_VISIBLE_DEVICES": "0" }
+}
+```
+
+参数保持 argv 边界。需要管道、变量展开等 shell 功能时，必须显式传入：
+
+```json
+{
+  "command": "bash",
+  "args": ["-lc", "python3 train.py | tee run.log"]
+}
+```
+
+未指定日志路径时，默认写入：
+
+```text
+/tmp/pi-ssh-target-<uid>/<session-id>/<watch-id>.stdout.log
+/tmp/pi-ssh-target-<uid>/<session-id>/<watch-id>.stderr.log
+```
+
+状态目录权限为 `0700`，日志文件权限为 `0600`。实际日志路径会加入 `log_paths` 并出现在终态通知中。插件不自动轮转或删除日志。
+
+`start` 返回三种结果：
+
+- `started_and_watched`：任务已启动，Watcher 已 ready。
+- `started_unwatched`：任务已启动，但 Watcher 未建立。插件保留任务并唤醒 Agent 使用已有 host/PID 补建 `watch`，不会重新启动任务。
+- `launch_failed`：任务没有成功启动，没有活跃 Watcher。
 
 ### `watch`
 
@@ -133,7 +196,21 @@ ssh <ssh_args...> -- <host> python3 -
 }
 ```
 
-`list` 只读取当前 Pi session 的生命周期记录，不连接远程主机，也不读取远程状态文件。默认返回最近更新的 20 个活跃 watch，以及终态时间最晚的 5 个 watch；两个数量都可以在 0–100 范围内覆盖。
+`list` 只读取当前 Pi session 的生命周期记录，不连接远程主机，也不读取远程状态文件。默认分别返回最近更新的 20 个活跃 watch、20 个 `started_unwatched` 记录，以及终态时间最晚的 5 个 watch；数量可通过现有 limit 参数在 0–100 范围内覆盖。
+
+## 自动遗漏审计
+
+扩展在 `agent_start` 到 `agent_settled` 之间收集有界工具结果摘要。初筛只针对具备远程上下文、可能启动 detached 长任务的调用，例如正式的 `nohup`、创建 detached tmux/screen session、`setsid`、后台 shell 和明确 PID 输出；查看 tmux/session 状态等只读命令会被排除。
+
+只有存在未被同一 host/PID Watcher 覆盖的候选时，扩展才调用 Judge LLM：
+
+- 默认复用当前 Pi session 的模型、provider 鉴权和环境。
+- 使用独立短上下文，不携带完整会话和工具定义。
+- 命令与输出会截断，并明确标记为不可信数据，不是用户指令。
+- Judge 返回 `no` 时静默结束；返回 `yes`、`uncertain`，或模型/鉴权/解析失败时，唤醒正式 Agent 核实。
+- 审计批次通过 session custom entry 去重，审计唤醒本身没有新启动候选时不会循环触发。
+
+Judge usage 会保存在审计 custom entry 中。当前 Pi 的事件 hook 没有把嵌套模型 usage 汇总进 footer totals 的入口，因此这部分用量不保证显示在 session 总计中。
 
 ## Watcher 如何判断进程结束
 
@@ -197,14 +274,25 @@ pi.sendMessage(message, { triggerTurn: true, deliverAs: "steer" })
 
 ## 常见用法
 
-1. Agent 通过普通 SSH 启动长任务，并获得远程根 PID。
-2. Agent 调用 `pi_ssh_target` 的 `watch` action。
-3. 工具收到远程 `ready` 后立即返回，Agent 可以继续处理其他工作或结束当前 turn。
-4. 远程进程树进入 `finish`、`interrupt` 或 `close` 后，插件独立 steer 当前 session。
+优先流程：
+
+1. Agent 调用 `pi_ssh_target start`，传入远程 command 和 args。
+2. 工具返回 `started_and_watched` 后，Agent 可以继续其他工作或结束当前 turn。
+3. 如果返回 `started_unwatched`，Agent 使用返回的 host/PID 调用 `watch`，不得重复调用 `start`。
+4. 远程进程树进入 `finish`、`interrupt` 或 `close` 后，插件 steer 当前 session。
 5. Agent 根据提示检查日志和产物，再继续原计划。
+
+已有任务流程：
+
+1. Agent 通过普通 SSH 启动长任务并获得远程根 PID。
+2. Agent 在同一 run 调用 `pi_ssh_target watch`；无法登记时必须说明原因。
+3. 后续终态处理与上面相同。
 
 ## 限制
 
+- `start` 只支持非交互任务，不提供 TTY，stdin 固定为 `/dev/null`。
+- `start` 不解析 scheduler 作业 ID，也不把 `sbatch` 自动映射为执行节点 PID。
+- Judge 依赖当前模型可用；失败时会按 `uncertain` 唤醒正式 Agent，因此可能产生保守的额外核实 turn。
 - 不提供 SSH 或 Watcher 自动重试。
 - 不补发 Pi 离线期间错过的事件。
 - 不提供反向隧道、HTTP listener、socket、token 或事件文件传输。

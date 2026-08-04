@@ -13,11 +13,22 @@ export function parseProtocolLine(line: string): WatcherProtocolEvent | undefine
 function isProtocolEvent(value: unknown): value is WatcherProtocolEvent {
   if (!value || typeof value !== "object") return false;
   const event = value as Record<string, unknown>;
-  if (!(["ready", "finish", "interrupt"] as const).includes(event.event as never)) return false;
-  if (typeof event.watch_id !== "string" || typeof event.job_id !== "string" || typeof event.host !== "string") return false;
+  if (!("event" in event) || !(["launched", "ready", "finish", "interrupt"] as const).includes(event.event as never))
+    return false;
+  if (typeof event.watch_id !== "string" || typeof event.job_id !== "string" || typeof event.host !== "string")
+    return false;
   if (!Number.isInteger(event.root_pid) || !Number.isInteger(event.process_count)) return false;
   if (typeof event.observed_at !== "string") return false;
   if (event.state_file !== null && typeof event.state_file !== "string") return false;
+  if (event.event === "launched") {
+    return typeof event.stdout_path === "string" && typeof event.stderr_path === "string";
+  }
+  if (event.event === "ready") {
+    return (
+      (event.stdout_path === undefined || typeof event.stdout_path === "string") &&
+      (event.stderr_path === undefined || typeof event.stderr_path === "string")
+    );
+  }
   if (event.event === "interrupt") {
     return typeof event.error_code === "string" && typeof event.error === "string";
   }

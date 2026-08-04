@@ -2,12 +2,12 @@ import type { ChildProcessWithoutNullStreams } from "node:child_process";
 
 /** Terminal states persisted for one watch. */
 export type WatchTerminalKind = "finish" | "interrupt" | "close" | "cancelled";
+export type WatchStatus = "started" | "started_unwatched" | WatchTerminalKind;
+export type StartOutcome = "started_and_watched" | "started_unwatched" | "launch_failed";
 
-/** Public watch action parameters. */
-export interface WatchInput {
-  action: "watch";
+/** Metadata shared by watch and start actions. */
+export interface WatchMetadataInput {
   host: string;
-  pid: number;
   job_id: string;
   ssh_args?: string[];
   interval_seconds?: number;
@@ -15,6 +15,23 @@ export interface WatchInput {
   result_paths?: string[];
   log_paths?: string[];
   note?: string;
+}
+
+/** Public watch action parameters. */
+export interface WatchInput extends WatchMetadataInput {
+  action: "watch";
+  pid: number;
+}
+
+/** Public start action parameters. */
+export interface StartInput extends WatchMetadataInput {
+  action: "start";
+  command: string;
+  args: string[];
+  cwd?: string;
+  env?: Record<string, string>;
+  stdout_path?: string;
+  stderr_path?: string;
 }
 
 /** Public cancel action parameters. */
@@ -31,7 +48,7 @@ export interface ListInput {
 }
 
 /** Combined custom tool parameters. */
-export type ToolInput = WatchInput | CancelInput | ListInput;
+export type ToolInput = WatchInput | StartInput | CancelInput | ListInput;
 
 /** Complete restart configuration persisted in the Pi session. */
 export interface WatchConfig {
@@ -47,6 +64,12 @@ export interface WatchConfig {
   log_paths: string[];
   note?: string;
   resume: boolean;
+  command?: string;
+  args?: string[];
+  cwd?: string;
+  env?: Record<string, string>;
+  stdout_path?: string;
+  stderr_path?: string;
 }
 
 /** Common fields emitted by the remote watcher protocol. */
@@ -60,9 +83,18 @@ export interface WatcherProtocolBase {
   state_file: string | null;
 }
 
+/** Remote process launch handshake. */
+export interface WatcherLaunchedEvent extends WatcherProtocolBase {
+  event: "launched";
+  stdout_path: string;
+  stderr_path: string;
+}
+
 /** Remote watcher startup handshake. */
 export interface WatcherReadyEvent extends WatcherProtocolBase {
   event: "ready";
+  stdout_path?: string;
+  stderr_path?: string;
 }
 
 /** Remote watcher normal terminal event. */
@@ -78,7 +110,11 @@ export interface WatcherInterruptEvent extends WatcherProtocolBase {
 }
 
 /** Every valid remote stdout protocol event. */
-export type WatcherProtocolEvent = WatcherReadyEvent | WatcherFinishEvent | WatcherInterruptEvent;
+export type WatcherProtocolEvent =
+  | WatcherLaunchedEvent
+  | WatcherReadyEvent
+  | WatcherFinishEvent
+  | WatcherInterruptEvent;
 
 /** Local close terminal metadata synthesized from SSH exit. */
 export interface WatchCloseEvent extends WatcherProtocolBase {
@@ -91,19 +127,21 @@ export interface WatchCloseEvent extends WatcherProtocolBase {
 /** Session lifecycle record stored as a Pi custom entry. */
 export interface WatchLifecycleRecord {
   version: 1;
-  kind: "started" | WatchTerminalKind;
+  kind: WatchStatus;
   watch_id: string;
   at: string;
   config: WatchConfig;
   event?: WatcherFinishEvent | WatcherInterruptEvent | WatchCloseEvent;
+  error?: string;
 }
 
 /** Current state reconstructed from lifecycle records. */
 export interface WatchState {
   config: WatchConfig;
-  status: "started" | WatchTerminalKind;
+  status: WatchStatus;
   updated_at: string;
   event?: WatcherFinishEvent | WatcherInterruptEvent | WatchCloseEvent;
+  error?: string;
 }
 
 /** Active local process and protocol bookkeeping. */
@@ -112,6 +150,7 @@ export interface ActiveWatch {
   child: ChildProcessWithoutNullStreams;
   stderrTail: Buffer;
   ready: boolean;
+  launched?: WatcherLaunchedEvent;
   terminalHandled: boolean;
   intentionalClose: boolean;
 }
@@ -141,13 +180,37 @@ export interface WatchSummary {
   updated_at: string;
   process_count?: number;
   state_file?: string | null;
+  error?: string;
 }
+
+/** Start result returned by SshWatchManager. */
+export type StartManagerResult =
+  | {
+      outcome: "started_and_watched";
+      ready: WatcherReadyEvent;
+      launched: WatcherLaunchedEvent;
+    }
+  | {
+      outcome: "started_unwatched";
+      launched: WatcherLaunchedEvent;
+      error: string;
+    };
 
 /** Compact result details returned by pi_ssh_target. */
 export interface ToolDetails {
   action: ToolInput["action"];
+  outcome?: StartOutcome;
   watch?: WatchState | WatchSummary;
   active?: WatchSummary[];
+  unwatched?: WatchSummary[];
   terminal?: WatchSummary[];
+  launch?: {
+    host: string;
+    pid: number;
+    command: string;
+    args: string[];
+    stdout_path: string;
+    stderr_path: string;
+  };
   error?: string;
 }
