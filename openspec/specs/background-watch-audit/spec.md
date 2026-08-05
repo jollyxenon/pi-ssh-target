@@ -109,7 +109,7 @@ Judge SHALL 返回零个或多个结构化决策，每个决策 SHALL 表示 `wa
 
 #### Scenario: 参数完整且可验证
 - **WHEN** Judge 返回 `watch`，host、正整数 PID 和所需 SSH 参数均能由快照证据验证，且没有匹配的活跃或终态覆盖记录
-- **THEN** extension 生成 watch ID 和缺省 job ID，并直接建立 Watcher
+- **THEN** extension 生成 watch ID，并直接建立 Watcher
 
 #### Scenario: 参数由模型凭空生成
 - **WHEN** Judge 返回的 host、PID 或 SSH 参数无法由审计快照验证

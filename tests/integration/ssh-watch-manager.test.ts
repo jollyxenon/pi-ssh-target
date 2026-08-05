@@ -16,7 +16,7 @@ function config(host: string, id = "watch-1"): WatchConfig {
     session_id: "session-1",
     host,
     pid: 123,
-    job_id: `job-${id}`,
+    description: `job-${id}`,
     ssh_args: ["-o", "BatchMode=yes"],
     interval_seconds: 5,
     startup_timeout_seconds: 0.08,

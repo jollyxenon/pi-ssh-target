@@ -14,7 +14,7 @@ process.stdin.on("end", () => {
   const prefix = "@@PI_SSH_TARGET@@";
   const base = {
     watch_id: config.watch_id,
-    job_id: config.job_id,
+    description: config.description,
     host: config.host,
     root_pid: config.root_pid,
     process_count: 2,

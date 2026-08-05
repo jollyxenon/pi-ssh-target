@@ -121,7 +121,6 @@ export class SshWatchManager {
               this.finishOnce(active, {
                 event: "interrupt",
                 watch_id: config.watch_id,
-                job_id: config.job_id,
                 host: config.host,
                 root_pid: config.pid,
                 process_count: 0,
@@ -199,7 +198,6 @@ export class SshWatchManager {
         this.finishOnce(active, {
           event: "close",
           watch_id: config.watch_id,
-          job_id: config.job_id,
           host: config.host,
           root_pid: config.pid,
           process_count: 0,
@@ -218,7 +216,6 @@ export class SshWatchManager {
       const remoteConfig = {
         watch_id: config.watch_id,
         session_id: config.session_id,
-        job_id: config.job_id,
         host: config.host,
         root_pid: config.pid,
         interval_seconds: config.interval_seconds,

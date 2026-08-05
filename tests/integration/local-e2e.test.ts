@@ -65,7 +65,7 @@ describe("Linux/WSL local end-to-end", () => {
       {
         action: "start",
         host: "local-test",
-        job_id: "real-start",
+        description: "real-start",
         command: "python3",
         args: ["-c", "import time; print('started', flush=True); time.sleep(0.2)"],
         interval_seconds: 0.02,
@@ -106,7 +106,7 @@ describe("Linux/WSL local end-to-end", () => {
         action: "watch",
         host: "local-test",
         pid: target.pid,
-        job_id: "real-process-tree",
+        description: "real-process-tree",
         interval_seconds: 0.02,
         startup_timeout_seconds: 2,
       },

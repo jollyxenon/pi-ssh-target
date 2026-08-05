@@ -40,7 +40,7 @@ const config: WatchConfig = {
   session_id: "session-1",
   host: "remote",
   pid: 42,
-  job_id: "job",
+  description: "job",
   ssh_args: [],
   interval_seconds: 5,
   startup_timeout_seconds: 10,
@@ -107,7 +107,7 @@ function snapshot(): AuditSnapshot {
 describe("shared contracts", () => {
   it("applies required defaults and fixed list counts", () => {
     const normalized = normalizeWatchConfig(
-      { action: "watch", host: "remote", pid: 42, job_id: "job" },
+      { action: "watch", host: "remote", pid: 42, description: "job" },
       "watch-1",
       "session-1",
     );
@@ -115,7 +115,7 @@ describe("shared contracts", () => {
     expect(normalized.startup_timeout_seconds).toBe(
       DEFAULT_STARTUP_TIMEOUT_SECONDS,
     );
-    expect([DEFAULT_ACTIVE_LIMIT, DEFAULT_TERMINAL_LIMIT]).toEqual([20, 5]);
+    expect([DEFAULT_ACTIVE_LIMIT, DEFAULT_TERMINAL_LIMIT]).toEqual([3, 0]);
   });
 
   it("validates metadata and structured start input", () => {
@@ -124,15 +124,15 @@ describe("shared contracts", () => {
         action: "watch",
         host: "h",
         pid: 1,
-        job_id: "x".repeat(201),
+        description: "x".repeat(2001),
       }),
-    ).toContain("job_id");
+    ).toContain("description");
     expect(
       validateWatchInput({
         action: "watch",
         host: "h",
         pid: 1,
-        job_id: "j",
+        description: "j",
         note: "x".repeat(2001),
       }),
     ).toContain("note");
@@ -141,14 +141,14 @@ describe("shared contracts", () => {
         action: "watch",
         host: "h",
         pid: 1,
-        job_id: "j",
+        description: "j",
         result_paths: Array(21).fill("x"),
       }),
     ).toContain("20");
     const input = {
       action: "start" as const,
       host: "remote",
-      job_id: "job",
+      description: "job",
       command: "python3",
       args: ["train.py", "a; b"],
     };
@@ -161,7 +161,7 @@ describe("shared contracts", () => {
   it("parses fixed protocol lines and preserves chunk tails", () => {
     expect(
       parseProtocolLine(
-        '@@PI_SSH_TARGET@@{"event":"ready","watch_id":"w","job_id":"j","host":"h","root_pid":1,"process_count":1,"observed_at":"now","state_file":"/tmp/x"}',
+        '@@PI_SSH_TARGET@@{"event":"ready","watch_id":"w","description":"j","host":"h","root_pid":1,"process_count":1,"observed_at":"now","state_file":"/tmp/x"}',
       )?.event,
     ).toBe("ready");
     expect(parseProtocolLine("banner")).toBeUndefined();
@@ -786,7 +786,6 @@ describe("shared contracts", () => {
       buildTerminalPrompt(config, {
         event: "interrupt",
         watch_id: "watch-1",
-        job_id: "job",
         host: "remote",
         root_pid: 42,
         process_count: 3,

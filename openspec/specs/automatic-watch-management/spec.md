@@ -70,7 +70,7 @@
 - **THEN** 系统按稳定标识或内容摘要跳过重复审计
 
 ### Requirement: start action 使用结构化启动参数
-`pi_ssh_target` SHALL 提供 `start` action，接受 SSH destination、`command`、`args[]`、`job_id`，并可接受 `cwd`、环境变量、SSH 参数、扫描间隔、启动超时、日志路径、结果路径和 note。
+`pi_ssh_target` SHALL 提供 `start` action，接受 SSH destination、`command`、`args[]`，并可接受 `description`、`cwd`、环境变量、SSH 参数、扫描间隔、启动超时、日志路径、结果路径和 note。
 
 #### Scenario: 使用参数数组启动脚本
 - **WHEN** Agent 提交 `command: "python3"` 和独立的脚本参数数组

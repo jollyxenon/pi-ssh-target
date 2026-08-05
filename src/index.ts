@@ -65,7 +65,7 @@ const ToolParameters = Type.Object({
   pid: Type.Optional(
     Type.Integer({ minimum: 1, description: "Remote root PID" }),
   ),
-  job_id: Type.Optional(Type.String()),
+  description: Type.Optional(Type.String()),
   ssh_args: Type.Optional(Type.Array(Type.String())),
   interval_seconds: Type.Optional(Type.Number({ exclusiveMinimum: 0 })),
   startup_timeout_seconds: Type.Optional(Type.Number({ exclusiveMinimum: 0 })),
@@ -174,7 +174,6 @@ export default function piSshTarget(
     const event: WatchCloseEvent = {
       event: "close",
       watch_id: config.watch_id,
-      job_id: config.job_id,
       host: config.host,
       root_pid: config.pid,
       process_count: 0,
@@ -409,7 +408,6 @@ export default function piSshTarget(
             action: "watch",
             host: suggestion.host,
             pid: suggestion.pid,
-            job_id: suggestion.job_id,
             ssh_args: [
               ...suggestion.ssh_args,
               "-o",
@@ -809,17 +807,17 @@ export default function piSshTarget(
       `active: ${active.length}`,
       ...active.map(
         (state) =>
-          `- ${state.watch_id} ${state.status} ${state.host} PID ${state.pid} ${state.job_id}`,
+          `- ${state.watch_id} ${state.status} ${state.host} PID ${state.pid}${state.description ? ` ${state.description}` : ""}`,
       ),
       `unwatched: ${unwatched.length}`,
       ...unwatched.map(
         (state) =>
-          `- ${state.watch_id} ${state.status} ${state.host} PID ${state.pid} ${state.job_id}`,
+          `- ${state.watch_id} ${state.status} ${state.host} PID ${state.pid}${state.description ? ` ${state.description}` : ""}`,
       ),
       `terminal: ${terminal.length}`,
       ...terminal.map(
         (state) =>
-          `- ${state.watch_id} ${state.status} ${state.host} PID ${state.pid} ${state.job_id}`,
+          `- ${state.watch_id} ${state.status} ${state.host} PID ${state.pid}${state.description ? ` ${state.description}` : ""}`,
       ),
       `audits: ${audits.length}`,
       ...audits.map(
@@ -870,7 +868,6 @@ export default function piSshTarget(
   function requireWatchFields(input: WatchInput): string | undefined {
     if (typeof input.host !== "string") return "watch 需要 host";
     if (typeof input.pid !== "number") return "watch 需要 pid";
-    if (typeof input.job_id !== "string") return "watch 需要 job_id";
     if (!sessionContext) return "Pi session 尚未初始化";
     return undefined;
   }
@@ -880,7 +877,6 @@ export default function piSshTarget(
     if (typeof input.host !== "string") return "start 需要 host";
     if (typeof input.command !== "string") return "start 需要 command";
     if (!Array.isArray(input.args)) return "start 需要 args 数组";
-    if (typeof input.job_id !== "string") return "start 需要 job_id";
     if (!sessionContext) return "Pi session 尚未初始化";
     return undefined;
   }
@@ -933,7 +929,9 @@ function summarize(state: WatchState): WatchSummary {
     status: state.status,
     host: state.config.host,
     pid: state.config.pid,
-    job_id: state.config.job_id,
+    ...(state.config.description === undefined
+      ? {}
+      : { description: state.config.description }),
     updated_at: state.updated_at,
     ...(state.origin === undefined ? {} : { origin: state.origin }),
     ...(state.event === undefined

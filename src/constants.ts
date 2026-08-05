@@ -9,10 +9,10 @@ import type {
 
 export const DEFAULT_INTERVAL_SECONDS = 5;
 export const DEFAULT_STARTUP_TIMEOUT_SECONDS = 10;
-export const DEFAULT_ACTIVE_LIMIT = 20;
-export const DEFAULT_TERMINAL_LIMIT = 5;
+export const DEFAULT_ACTIVE_LIMIT = 3;
+export const DEFAULT_TERMINAL_LIMIT = 0;
 export const MAX_LIST_LIMIT = 100;
-export const MAX_JOB_ID = 200;
+export const MAX_DESCRIPTION = 2000;
 export const MAX_NOTE = 2000;
 export const MAX_PATHS = 20;
 export const MAX_PATH_LENGTH = 1000;
@@ -30,8 +30,8 @@ export const MESSAGE_TYPE = "pi-ssh-target-terminal";
 /** Validates metadata shared by watch and start before SSH is created. */
 function validateMetadata(input: WatchMetadataInput): string | undefined {
   if (!input.host) return "host 不能为空";
-  if (!input.job_id) return "job_id 不能为空";
-  if (input.job_id.length > MAX_JOB_ID) return `job_id 最多 ${MAX_JOB_ID} 字符`;
+  if ((input.description?.length ?? 0) > MAX_DESCRIPTION)
+    return `description 最多 ${MAX_DESCRIPTION} 字符`;
   if ((input.note?.length ?? 0) > MAX_NOTE) return `note 最多 ${MAX_NOTE} 字符`;
   for (const [name, paths] of [
     ["result_paths", input.result_paths],
@@ -105,7 +105,7 @@ export function normalizeWatchConfig(
     session_id: sessionId,
     host: input.host,
     pid: input.action === "watch" ? input.pid : 0,
-    job_id: input.job_id,
+    ...(input.description === undefined ? {} : { description: input.description }),
     ssh_args: [...(input.ssh_args ?? [])],
     interval_seconds: input.interval_seconds ?? DEFAULT_INTERVAL_SECONDS,
     startup_timeout_seconds: input.startup_timeout_seconds ?? DEFAULT_STARTUP_TIMEOUT_SECONDS,

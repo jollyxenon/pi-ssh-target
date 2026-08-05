@@ -13,21 +13,21 @@
 - **THEN** 工具 schema 包含 `watch`、`cancel`、`list` action
 
 ### Requirement: Watch input contract
-`watch` action SHALL 要求 `host`、`pid` 和 `job_id`。系统 SHALL 接受可选 `ssh_args[]`、`interval_seconds`、`startup_timeout_seconds`、`result_paths`、`log_paths` 和 `note`。默认扫描间隔 SHALL 为 5 秒，默认启动超时 SHALL 为 10 秒。
+`watch` action SHALL 要求 `host` 和 `pid`。系统 SHALL 接受可选 `description`、`ssh_args[]`、`interval_seconds`、`startup_timeout_seconds`、`result_paths`、`log_paths` 和 `note`。默认扫描间隔 SHALL 为 5 秒，默认启动超时 SHALL 为 10 秒。
 
 #### Scenario: Register a watch with defaults
-- **WHEN** Agent 使用合法的 `host`、活动 PID 和 `job_id` 调用 `watch`
+- **WHEN** Agent 使用合法的 `host` 和活动 PID 调用 `watch`
 - **THEN** 系统为该调用生成唯一 `watch_id`
 - **THEN** 系统使用 5 秒扫描间隔和 10 秒启动超时
 - **THEN** 工具在远程 Watcher ready 后返回，不等待目标进程树结束
 
 #### Scenario: Allow duplicate registrations
-- **WHEN** Agent 对相同 `host`、PID 和 `job_id` 重复调用 `watch`
+- **WHEN** Agent 对相同 `host` 和 PID 重复调用 `watch`
 - **THEN** 系统为每次调用生成不同 `watch_id`
 - **THEN** 系统分别启动和管理这些 Watcher
 
 ### Requirement: Metadata limits
-系统 SHALL 限制注入上下文的 watch 元数据：`job_id` 最多 200 字符，`note` 最多 2000 字符，`result_paths` 和 `log_paths` 各最多 20 项，每项最多 1000 字符。SSH stderr SHALL 仅保留尾部最多 2000 字节。
+系统 SHALL 限制注入上下文的 watch 元数据：`description` 和 `note` 最多 2000 字符，`result_paths` 和 `log_paths` 各最多 20 项，每项最多 1000 字符。SSH stderr SHALL 仅保留尾部最多 2000 字节。
 
 #### Scenario: Reject oversized metadata
 - **WHEN** `watch` 输入超过任一元数据限制
@@ -132,7 +132,7 @@ Watcher stdout SHALL 使用带固定前缀的 JSONL 协议。远程 Watcher SHAL
 #### Scenario: Process tree finishes
 - **WHEN** 所有已跟踪进程身份都已消失
 - **THEN** Watcher输出 `finish`
-- **THEN** 事件包含 `watch_id`、`job_id`、host、根 PID、进程数量、观测时间和状态文件路径摘要
+- **THEN** 事件包含 `watch_id`、host、根 PID、进程数量、观测时间和状态文件路径摘要
 
 #### Scenario: Watcher reports an internal interruption
 - **WHEN** Watcher无法继续监控且仍能写 stdout

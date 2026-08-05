@@ -8,7 +8,7 @@ export type StartOutcome = "started_and_watched" | "started_unwatched" | "launch
 /** Metadata shared by watch and start actions. */
 export interface WatchMetadataInput {
   host: string;
-  job_id: string;
+  description?: string;
   ssh_args?: string[];
   interval_seconds?: number;
   startup_timeout_seconds?: number;
@@ -56,7 +56,7 @@ export interface WatchConfig {
   session_id: string;
   host: string;
   pid: number;
-  job_id: string;
+  description?: string;
   ssh_args: string[];
   interval_seconds: number;
   startup_timeout_seconds: number;
@@ -75,7 +75,6 @@ export interface WatchConfig {
 /** Common fields emitted by the remote watcher protocol. */
 export interface WatcherProtocolBase {
   watch_id: string;
-  job_id: string;
   host: string;
   root_pid: number;
   process_count: number;
@@ -178,7 +177,7 @@ export interface WatchSummary {
   status: WatchState["status"];
   host: string;
   pid: number;
-  job_id: string;
+  description?: string;
   updated_at: string;
   origin?: "audit";
   process_count?: number;

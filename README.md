@@ -68,7 +68,6 @@ Package 注册一个工具：`pi_ssh_target`。工具有四种 action：`start`�
 |---|---|---|
 | `action` | `"start"` | 固定值 |
 | `host` | string | SSH destination |
-| `job_id` | string | 任务标识，最多 200 字符 |
 | `command` | string | 远程可执行程序或脚本解释器 |
 | `args` | string[] | 独立 argv 参数数组，不经过隐式 shell |
 
@@ -81,7 +80,7 @@ Package 注册一个工具：`pi_ssh_target`。工具有四种 action：`start`�
 | `stdout_path` | stdout 日志路径 |
 | `stderr_path` | stderr 日志路径 |
 
-`ssh_args`、`interval_seconds`、`startup_timeout_seconds`、`result_paths`、`log_paths` 和 `note` 与 `watch` 相同。
+`ssh_args`、`interval_seconds`、`startup_timeout_seconds`、`result_paths`、`log_paths`、`description` 和 `note` 与 `watch` 相同。
 
 示例：
 
@@ -89,7 +88,7 @@ Package 注册一个工具：`pi_ssh_target`。工具有四种 action：`start`�
 {
   "action": "start",
   "host": "gpu01",
-  "job_id": "train-exp-17",
+  "description": "训练实验 17",
   "command": "python3",
   "args": ["/data/train.py", "--epochs", "100"],
   "cwd": "/data/project",
@@ -130,8 +129,6 @@ Package 注册一个工具：`pi_ssh_target`。工具有四种 action：`start`�
 | `action` | `"watch"` | 固定值 |
 | `host` | string | SSH destination，例如 `gpu01` 或 `user@example.com` |
 | `pid` | integer | 远程根 PID |
-| `job_id` | string | 任务标识，最多 200 字符 |
-
 可选参数：
 
 | 参数 | 默认值 | 说明 |
@@ -141,6 +138,7 @@ Package 注册一个工具：`pi_ssh_target`。工具有四种 action：`start`�
 | `startup_timeout_seconds` | `10` | 等待 Watcher `ready` 的秒数 |
 | `result_paths` | `[]` | 最多 20 项，每项最多 1000 字符 |
 | `log_paths` | `[]` | 最多 20 项，每项最多 1000 字符 |
+| `description` | 无 | 任务说明，最多 2000 字符 |
 | `note` | 无 | 补充说明，最多 2000 字符 |
 
 示例：
@@ -150,7 +148,7 @@ Package 注册一个工具：`pi_ssh_target`。工具有四种 action：`start`�
   "action": "watch",
   "host": "gpu01",
   "pid": 24831,
-  "job_id": "train-exp-17",
+  "description": "训练实验 17",
   "ssh_args": ["-p", "2222", "-i", "/home/me/.ssh/id_ed25519"],
   "interval_seconds": 2,
   "startup_timeout_seconds": 15,
@@ -168,7 +166,7 @@ ssh <ssh_args...> -- <host> python3 -
 
 参数通过 `child_process.spawn()` 作为独立 argv 传递，不经过本地 shell。Python Watcher 源码和配置从 stdin 发送，远程主机不需要预装本 package。
 
-同一个 `host + pid + job_id` 可以重复登记。每次调用都会生成独立的 `watch_id`，并占用一条本机 SSH 连接和一个远程 Python 进程。
+同一个 `host + pid` 可以重复登记。每次调用都会生成独立的 `watch_id`，并占用一条本机 SSH 连接和一个远程 Python 进程。
 
 ### `cancel`
 
@@ -191,12 +189,12 @@ ssh <ssh_args...> -- <host> python3 -
 ```json
 {
   "action": "list",
-  "active_limit": 20,
-  "terminal_limit": 5
+  "active_limit": 3,
+  "terminal_limit": 0
 }
 ```
 
-`list` 只读取当前 Pi session 的生命周期和后台审计记录，不连接远程主机，也不读取远程状态文件。默认分别返回最近更新的 20 个活跃 watch、20 个 `started_unwatched` 记录，以及终态时间最晚的 5 个 watch 和审计结果；数量可通过现有 limit 参数在 0–100 范围内覆盖。
+`list` 只读取当前 Pi session 的生命周期和后台审计记录，不连接远程主机，也不读取远程状态文件。默认分别返回最近更新的 3 个活跃 watch、3 个 `started_unwatched` 记录，以及 0 个终态 watch 和审计结果；数量可通过现有 limit 参数在 0–100 范围内覆盖。
 
 ## 自动遗漏审计
 

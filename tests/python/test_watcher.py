@@ -55,7 +55,7 @@ class WatcherTestCase(unittest.TestCase):
         result: dict[str, object] = {
             "watch_id": "watch-1",
             "session_id": "session-1",
-            "job_id": "job-1",
+            "description": "job-1",
             "host": "remote.example",
             "root_pid": 100,
             "interval_seconds": 0.01,

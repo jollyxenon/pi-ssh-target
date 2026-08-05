@@ -118,9 +118,9 @@ describe.sequential("pi_ssh_target extension", () => {
       action: "watch",
       host: "hang",
       pid: 1,
-      job_id: "x".repeat(201),
+      description: "x".repeat(2001),
     });
-    expect(result.details.error).toContain("job_id");
+    expect(result.details.error).toContain("description");
     expect(() =>
       readFileSync(process.env.FAKE_SSH_COUNT_FILE!, "utf8"),
     ).toThrow();
@@ -134,13 +134,13 @@ describe.sequential("pi_ssh_target extension", () => {
       action: "watch",
       host: "hang",
       pid: 42,
-      job_id: "same",
+      description: "same",
     });
     const second = await callTool(pi, {
       action: "watch",
       host: "hang",
       pid: 42,
-      job_id: "same",
+      description: "same",
     });
     expect(first.details.watch.watch_id).not.toBe(
       second.details.watch.watch_id,
@@ -177,14 +177,14 @@ describe.sequential("pi_ssh_target extension", () => {
       action: "watch",
       host: "finish",
       pid: 10,
-      job_id: "one",
+      description: "one",
       note: "metadata",
     });
     await callTool(pi, {
       action: "watch",
       host: "finish",
       pid: 11,
-      job_id: "two",
+      description: "two",
     });
     await delay();
 
@@ -214,7 +214,7 @@ describe.sequential("pi_ssh_target extension", () => {
     const watched = await callTool(watchedPi, {
       action: "start",
       host: "start-finish",
-      job_id: "launch-ok",
+      description: "launch-ok",
       command: "python3",
       args: ["train.py", "--epochs", "2"],
     });
@@ -235,7 +235,7 @@ describe.sequential("pi_ssh_target extension", () => {
     const partial = await callTool(partialPi, {
       action: "start",
       host: "start-no-ready",
-      job_id: "launch-partial",
+      description: "launch-partial",
       command: "python3",
       args: ["train.py"],
       startup_timeout_seconds: 0.05,
@@ -250,7 +250,7 @@ describe.sequential("pi_ssh_target extension", () => {
     expect(partialPi.messages.at(-1)?.message.content).toContain(
       "禁止再次调用 start",
     );
-    const partialList = await callTool(partialPi, { action: "list" });
+    const partialList = await callTool(partialPi, { action: "list", terminal_limit: 100 });
     expect(partialList.details.active).toEqual([]);
     expect(partialList.details.unwatched).toHaveLength(1);
   });
@@ -262,7 +262,7 @@ describe.sequential("pi_ssh_target extension", () => {
     const result = await callTool(pi, {
       action: "start",
       host: "start-hang",
-      job_id: "launch-local-failure",
+      description: "launch-local-failure",
       command: "python3",
       args: ["train.py"],
     });
@@ -279,7 +279,7 @@ describe.sequential("pi_ssh_target extension", () => {
     const result = await callTool(pi, {
       action: "start",
       host: "launch-fail",
-      job_id: "launch-fail",
+      description: "launch-fail",
       command: "missing",
       args: [],
     });
@@ -339,7 +339,7 @@ describe.sequential("pi_ssh_target extension", () => {
       ),
     ).toBe(true);
     expect(pi.messages).toHaveLength(0);
-    const listed = await callTool(pi, { action: "list" });
+    const listed = await callTool(pi, { action: "list", terminal_limit: 100 });
     expect(listed.details.audits.at(-1)?.watch_ids).toHaveLength(1);
   });
 
@@ -499,7 +499,7 @@ describe.sequential("pi_ssh_target extension", () => {
     });
     await pi.emit("agent_settled");
     await delay(40);
-    const listed = await callTool(pi, { action: "list" });
+    const listed = await callTool(pi, { action: "list", terminal_limit: 100 });
     expect(listed.details.audits[0]?.status).toBe("failed");
     expect(listed.details.audits[0]?.error).toContain("judge exploded");
   });
@@ -563,7 +563,7 @@ describe.sequential("pi_ssh_target extension", () => {
     expect(pi.entries.some((entry) => entry.data?.config?.pid === 999)).toBe(
       false,
     );
-    const listed = await callTool(pi, { action: "list" });
+    const listed = await callTool(pi, { action: "list", terminal_limit: 100 });
     expect(listed.details.audits[0]?.error).toContain("host_mismatch");
   });
 
@@ -666,7 +666,7 @@ describe.sequential("pi_ssh_target extension", () => {
       action: "watch",
       host: "hang",
       pid: 57,
-      job_id: "branch-covered",
+      description: "branch-covered",
     });
     await pi.emit("agent_start");
     await pi.emit("tool_result", {
@@ -698,7 +698,7 @@ describe.sequential("pi_ssh_target extension", () => {
       action: "watch",
       host: "finish",
       pid: 60,
-      job_id: "terminal-covered",
+      description: "terminal-covered",
     });
     await waitUntil(() =>
       pi.entries.some(
@@ -783,7 +783,7 @@ describe.sequential("pi_ssh_target extension", () => {
     await pi.emit("agent_settled");
     await delay(80);
     expect(pi.messages).toHaveLength(0);
-    const listed = await callTool(pi, { action: "list" });
+    const listed = await callTool(pi, { action: "list", terminal_limit: 100 });
     expect(listed.details.audits[0]?.status).toBe("failed");
   });
 
@@ -795,7 +795,7 @@ describe.sequential("pi_ssh_target extension", () => {
       action: "watch",
       host: "tree-race",
       pid: 58,
-      job_id: "tree-race",
+      description: "tree-race",
     });
     await pi.emit("session_tree");
     await delay(120);
@@ -815,7 +815,7 @@ describe.sequential("pi_ssh_target extension", () => {
       action: "watch",
       host: "ownership-race",
       pid: 61,
-      job_id: "ownership-race",
+      description: "ownership-race",
     });
     await pi.emit("session_tree");
     await delay(40);
@@ -841,7 +841,7 @@ describe.sequential("pi_ssh_target extension", () => {
       action: "watch",
       host: "slow-ready",
       pid: 53,
-      job_id: "restore-race",
+      description: "restore-race",
     });
     await firstPi.emit("session_shutdown");
 
@@ -935,7 +935,7 @@ describe.sequential("pi_ssh_target extension", () => {
     });
     await pi.emit("agent_settled");
     await delay(70);
-    const listed = await callTool(pi, { action: "list" });
+    const listed = await callTool(pi, { action: "list", terminal_limit: 100 });
     expect(listed.details.active).toEqual([]);
     expect(listed.details.audits[0]?.status).toBe("failed");
   });
@@ -948,7 +948,7 @@ describe.sequential("pi_ssh_target extension", () => {
       action: "watch",
       host: "hang",
       pid: 50,
-      job_id: "reload",
+      description: "reload",
     });
     await firstPi.emit("session_shutdown");
     await delay();

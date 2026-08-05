@@ -12,7 +12,7 @@ export function buildTerminalPrompt(
   }[event.event];
   const metadata = {
     watch_id: config.watch_id,
-    job_id: config.job_id,
+    description: config.description ?? null,
     host: config.host,
     root_pid: config.pid,
     process_count: event.process_count,
@@ -39,7 +39,7 @@ export function buildTerminalPrompt(
 export function buildStartedUnwatchedPrompt(config: WatchConfig, error: string): string {
   const metadata = {
     watch_id: config.watch_id,
-    job_id: config.job_id,
+    description: config.description ?? null,
     host: config.host,
     root_pid: config.pid,
     log_paths: config.log_paths,

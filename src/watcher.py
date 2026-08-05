@@ -345,7 +345,6 @@ class Watcher:
         payload = {
             "event": event,
             "watch_id": self.config["watch_id"],
-            "job_id": self.config["job_id"],
             "host": self.config["host"],
             "root_pid": self.config["root_pid"],
             "process_count": len(self.processes),
@@ -458,7 +457,7 @@ def validate_config(config: Mapping[str, Any]) -> Dict[str, Any]:
     if not isinstance(config, Mapping):
         raise WatcherInterrupt("config_error", "configuration must be an object")
     result = dict(config)
-    for key in ("watch_id", "session_id", "job_id", "host"):
+    for key in ("watch_id", "session_id", "host"):
         value = result.get(key)
         invalid_path_component = key in ("watch_id", "session_id") and isinstance(value, str) and (
             "/" in value or "\\" in value
@@ -515,7 +514,6 @@ def main(config: Optional[Mapping[str, Any]] = None) -> int:
         payload = {
             "event": "interrupt",
             "watch_id": fallback.get("watch_id"),
-            "job_id": fallback.get("job_id"),
             "host": fallback.get("host"),
             "root_pid": fallback.get("root_pid", fallback.get("pid")),
             "process_count": 0,

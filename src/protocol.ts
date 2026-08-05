@@ -15,7 +15,7 @@ function isProtocolEvent(value: unknown): value is WatcherProtocolEvent {
   const event = value as Record<string, unknown>;
   if (!("event" in event) || !(["launched", "ready", "finish", "interrupt"] as const).includes(event.event as never))
     return false;
-  if (typeof event.watch_id !== "string" || typeof event.job_id !== "string" || typeof event.host !== "string")
+  if (typeof event.watch_id !== "string" || typeof event.host !== "string")
     return false;
   if (!Number.isInteger(event.root_pid) || !Number.isInteger(event.process_count)) return false;
   if (typeof event.observed_at !== "string") return false;
