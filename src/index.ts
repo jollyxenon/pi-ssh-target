@@ -35,6 +35,7 @@ import {
   isTerminalStatus,
   LIFECYCLE_ENTRY_TYPE,
   MAX_LIST_LIMIT,
+  MAX_PASSWORD_LENGTH,
   MESSAGE_TYPE,
   normalizeWatchConfig,
   validateStartInput,
@@ -67,6 +68,9 @@ const ToolParameters = Type.Object({
   ),
   description: Type.Optional(Type.String()),
   ssh_args: Type.Optional(Type.Array(Type.String())),
+  password: Type.Optional(
+    Type.String({ maxLength: MAX_PASSWORD_LENGTH, description: "SSH password for password-only servers" }),
+  ),
   interval_seconds: Type.Optional(Type.Number({ exclusiveMinimum: 0 })),
   startup_timeout_seconds: Type.Optional(Type.Number({ exclusiveMinimum: 0 })),
   result_paths: Type.Optional(Type.Array(Type.String())),

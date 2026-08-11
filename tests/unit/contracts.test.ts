@@ -116,6 +116,12 @@ describe("shared contracts", () => {
       DEFAULT_STARTUP_TIMEOUT_SECONDS,
     );
     expect([DEFAULT_ACTIVE_LIMIT, DEFAULT_TERMINAL_LIMIT]).toEqual([3, 0]);
+    const withPassword = normalizeWatchConfig(
+      { action: "watch", host: "remote", pid: 42, password: "s3cret" },
+      "watch-2",
+      "session-1",
+    );
+    expect(withPassword.password).toBe("s3cret");
   });
 
   it("validates metadata and structured start input", () => {
@@ -153,6 +159,11 @@ describe("shared contracts", () => {
       args: ["train.py", "a; b"],
     };
     expect(validateStartInput(input)).toBeUndefined();
+    expect(validateStartInput({ ...input, password: "s3cret" })).toBeUndefined();
+    expect(
+      validateStartInput({ ...input, password: "x".repeat(513) }),
+    ).toContain("password");
+    expect(validateStartInput({ ...input, password: "" })).toContain("password");
     expect(
       validateStartInput({ ...input, env: { "BAD-NAME": "x" } }),
     ).toContain("env");

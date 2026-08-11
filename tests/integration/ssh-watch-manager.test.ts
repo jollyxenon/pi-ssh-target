@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -150,5 +150,40 @@ describe.sequential("SshWatchManager", () => {
       args: [],
     };
     await expect(manager.startLaunch(launchConfig)).rejects.toThrow("command not found");
+  });
+
+  it("injects askpass env for password auth and deletes the script on close", async () => {
+    const reportFile = join(temporaryDir, "env-report");
+    process.env.FAKE_SSH_REPORT_ENV_FILE = reportFile;
+    const manager = new SshWatchManager(() => {}, undefined, "# fake watcher");
+    const ready = await manager.start({
+      ...config("password-auth"),
+      password: "s3cret-pass",
+    });
+    expect(ready.event).toBe("ready");
+    const lines = readFileSync(reportFile, "utf8").trim().split("\n");
+    const report = JSON.parse(lines[0]!);
+    expect(report.password).toBe("s3cret-pass");
+    expect(report.require).toBe("force");
+    expect(report.askpass).toBeTruthy();
+    expect(report.scriptContent).toContain("$SSH_TARGET_PASSWORD");
+    expect(report.scriptContent).not.toContain("s3cret-pass");
+    // askpass 脚本 0700 可执行，且运行期间存在。
+    expect(statSync(report.askpass).mode & 0o777).toBe(0o700);
+    manager.closeAll();
+    await delay(50);
+    expect(existsSync(report.askpass)).toBe(false);
+  });
+
+  it("does not inject askpass env without a password", async () => {
+    const reportFile = join(temporaryDir, "env-report-plain");
+    process.env.FAKE_SSH_REPORT_ENV_FILE = reportFile;
+    const manager = new SshWatchManager(() => {}, undefined, "# fake watcher");
+    const ready = await manager.start(config("plain-auth"));
+    expect(ready.event).toBe("ready");
+    const report = JSON.parse(readFileSync(reportFile, "utf8").trim());
+    expect(report.askpass).toBe("");
+    expect(report.password).toBe("");
+    manager.closeAll();
   });
 });

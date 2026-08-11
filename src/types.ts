@@ -10,6 +10,7 @@ export interface WatchMetadataInput {
   host: string;
   description?: string;
   ssh_args?: string[];
+  password?: string;
   interval_seconds?: number;
   startup_timeout_seconds?: number;
   result_paths?: string[];
@@ -58,6 +59,7 @@ export interface WatchConfig {
   pid: number;
   description?: string;
   ssh_args: string[];
+  password?: string;
   interval_seconds: number;
   startup_timeout_seconds: number;
   result_paths: string[];

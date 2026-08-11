@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { appendFileSync } from "node:fs";
+import { appendFileSync, readFileSync } from "node:fs";
 
 let input = "";
 process.stdin.setEncoding("utf8");
@@ -11,6 +11,23 @@ process.stdin.on("end", () => {
   if (!match) process.exit(90);
   const config = JSON.parse(JSON.parse(match[1]));
   if (process.env.FAKE_SSH_COUNT_FILE) appendFileSync(process.env.FAKE_SSH_COUNT_FILE, "1\n");
+  // 密码认证测试：把 askpass 环境与脚本内容上报到指定文件。
+  if (process.env.FAKE_SSH_REPORT_ENV_FILE) {
+    const askpass = process.env.SSH_ASKPASS ?? "";
+    let scriptContent = "";
+    if (askpass) {
+      try { scriptContent = readFileSync(askpass, "utf8"); } catch {}
+    }
+    appendFileSync(
+      process.env.FAKE_SSH_REPORT_ENV_FILE,
+      JSON.stringify({
+        askpass,
+        require: process.env.SSH_ASKPASS_REQUIRE ?? "",
+        password: process.env.SSH_TARGET_PASSWORD ?? "",
+        scriptContent,
+      }) + "\n",
+    );
+  }
   const prefix = "@@PI_SSH_TARGET@@";
   const base = {
     watch_id: config.watch_id,

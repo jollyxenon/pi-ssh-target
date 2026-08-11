@@ -14,6 +14,7 @@ export const DEFAULT_TERMINAL_LIMIT = 0;
 export const MAX_LIST_LIMIT = 100;
 export const MAX_DESCRIPTION = 2000;
 export const MAX_NOTE = 2000;
+export const MAX_PASSWORD_LENGTH = 512;
 export const MAX_PATHS = 20;
 export const MAX_PATH_LENGTH = 1000;
 export const MAX_COMMAND_LENGTH = 1000;
@@ -33,6 +34,8 @@ function validateMetadata(input: WatchMetadataInput): string | undefined {
   if ((input.description?.length ?? 0) > MAX_DESCRIPTION)
     return `description 最多 ${MAX_DESCRIPTION} 字符`;
   if ((input.note?.length ?? 0) > MAX_NOTE) return `note 最多 ${MAX_NOTE} 字符`;
+  if (input.password !== undefined && (input.password.length === 0 || input.password.length > MAX_PASSWORD_LENGTH))
+    return `password 必须非空且最多 ${MAX_PASSWORD_LENGTH} 字符`;
   for (const [name, paths] of [
     ["result_paths", input.result_paths],
     ["log_paths", input.log_paths],
@@ -107,6 +110,7 @@ export function normalizeWatchConfig(
     pid: input.action === "watch" ? input.pid : 0,
     ...(input.description === undefined ? {} : { description: input.description }),
     ssh_args: [...(input.ssh_args ?? [])],
+    ...(input.password === undefined ? {} : { password: input.password }),
     interval_seconds: input.interval_seconds ?? DEFAULT_INTERVAL_SECONDS,
     startup_timeout_seconds: input.startup_timeout_seconds ?? DEFAULT_STARTUP_TIMEOUT_SECONDS,
     result_paths: [...(input.result_paths ?? [])],

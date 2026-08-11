@@ -11,7 +11,7 @@
 - Linux 或 WSL；不支持 Windows 原生环境。
 - Node.js 22.19 或更高版本。
 - 可直接执行的 `ssh` 命令。
-- 能通过密钥、ssh-agent 或 SSH config 完成非交互登录。
+- 能通过密钥、ssh-agent、SSH config 完成非交互登录，或通过 `password` 参数提供 SSH 密码（需 OpenSSH 8.4+，通过 `SSH_ASKPASS_REQUIRE=force` 机制注入，密码不出现在命令行参数中）。
 
 远程主机需要：
 
@@ -80,7 +80,7 @@ Package 注册一个工具：`pi_ssh_target`。工具有四种 action：`start`�
 | `stdout_path` | stdout 日志路径 |
 | `stderr_path` | stderr 日志路径 |
 
-`ssh_args`、`interval_seconds`、`startup_timeout_seconds`、`result_paths`、`log_paths`、`description` 和 `note` 与 `watch` 相同。
+`ssh_args`、`password`、`interval_seconds`、`startup_timeout_seconds`、`result_paths`、`log_paths`、`description` 和 `note` 与 `watch` 相同。
 
 示例：
 
@@ -134,6 +134,7 @@ Package 注册一个工具：`pi_ssh_target`。工具有四种 action：`start`�
 | 参数 | 默认值 | 说明 |
 |---|---:|---|
 | `ssh_args` | `[]` | 原样放在 destination 前的 SSH argv，例如端口、密钥或 ProxyJump |
+| `password` | 无 | SSH 密码（仅密码认证的服务器，如租用 GPU 平台）；非空且最多 512 字符。密码经临时 askpass 脚本注入子进程环境，脚本 0700 权限、SSH 结束后立即删除；会随会话记录持久化以便恢复 |
 | `interval_seconds` | `5` | 远程 `/proc` 扫描间隔 |
 | `startup_timeout_seconds` | `10` | 等待 Watcher `ready` 的秒数 |
 | `result_paths` | `[]` | 最多 20 项，每项最多 1000 字符 |
@@ -359,7 +360,7 @@ pi.sendMessage(message, { triggerTurn: true, deliverAs: "steer" })
 - `/proc` 进程树发现失败时，不降级成单 PID 监控。
 - 不自动读取远程日志、结果文件或完整进程树。
 - 不限制 `ssh_args` 内容；连接行为由调用方负责。
-- 不实现 SSH 密码交互。需要密码输入的连接可能卡在启动阶段，随后触发启动超时。
+- 不提供交互式密码提示；需要密码的连接必须显式传 `password` 参数，否则可能卡在启动阶段并触发启动超时。
 - 主动关闭本机 SSH 后，远程 Python 进程不保证立即退出。
 - 根进程退出前尚未被扫描到、并且已经脱离原进程树的后代可能无法发现；需要时可降低 `interval_seconds`。
 - 每个活跃 watch 都占用一条本机 SSH 连接和一个远程 Python 进程，第一版没有活跃数量上限。

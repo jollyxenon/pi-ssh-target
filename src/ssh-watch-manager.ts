@@ -1,5 +1,8 @@
 import { type ChildProcessWithoutNullStreams, spawn } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { PROTOCOL_PREFIX, STDERR_TAIL_BYTES } from "./constants.js";
 import { consumeLines, parseProtocolLine } from "./protocol.js";
@@ -50,8 +53,20 @@ export class SshWatchManager {
     if (signal?.aborted) return Promise.reject(new Error("watch 启动已取消"));
     if (this.active.has(config.watch_id)) throw new Error(`watch 已在运行: ${config.watch_id}`);
     const args = [...config.ssh_args, "--", config.host, "python3", "-"];
+    // 密码认证：askpass 脚本只读环境变量，脚本本身不含密码明文。
+    const askpassPath = config.password === undefined ? undefined : createAskpassScript();
+    const env =
+      askpassPath === undefined
+        ? undefined
+        : {
+            ...process.env,
+            SSH_ASKPASS: askpassPath,
+            SSH_ASKPASS_REQUIRE: "force",
+            SSH_TARGET_PASSWORD: config.password,
+          };
     const child = this.spawnProcess("ssh", args, {
       stdio: ["pipe", "pipe", "pipe"],
+      ...(env === undefined ? {} : { env }),
     }) as ChildProcessWithoutNullStreams;
     const active: ActiveWatch = {
       config,
@@ -99,7 +114,8 @@ export class SshWatchManager {
       };
 
       const timeout = setTimeout(() => {
-        failStartup(new Error(`SSH Watcher 启动超时（${config.startup_timeout_seconds} 秒）`));
+        const tail = active.stderrTail.toString("utf8").trim();
+        failStartup(new Error(`SSH Watcher 启动超时（${config.startup_timeout_seconds} 秒）${tail ? `: ${tail}` : ""}`));
       }, config.startup_timeout_seconds * 1000);
 
       child.stderr.on("data", (chunk: Buffer) => {
@@ -179,10 +195,13 @@ export class SshWatchManager {
       });
 
       child.on("error", (error) => {
+        // spawn 失败不会触发 close，这里兜底清理 askpass 脚本。
+        if (askpassPath !== undefined) rmSync(askpassPath, { force: true });
         if (!active.ready) failStartup(error);
       });
 
       child.on("close", (code, closeSignal) => {
+        if (askpassPath !== undefined) rmSync(askpassPath, { force: true });
         clearTimeout(timeout);
         this.deleteIfCurrent(active);
         if (!settled && !active.ready) {
@@ -289,4 +308,15 @@ export class SshWatchManager {
     const diagnostic = stderr.toString("utf8").trim();
     return `SSH Watcher 启动前退出（code=${String(code)}, signal=${String(signal)}）${diagnostic ? `: ${diagnostic}` : ""}`;
   }
+}
+
+/** 创建一次性 askpass 脚本：只输出环境变量中的密码，脚本本身不含明文。 */
+function createAskpassScript(): string {
+  const scriptPath = join(tmpdir(), `pi-ssh-target-askpass-${randomUUID()}`);
+  writeFileSync(
+    scriptPath,
+    "#!/bin/sh\nprintf '%s\\n' \"$SSH_TARGET_PASSWORD\"\n",
+    { mode: 0o700 },
+  );
+  return scriptPath;
 }
