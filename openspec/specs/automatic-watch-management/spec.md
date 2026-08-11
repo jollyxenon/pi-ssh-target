@@ -3,9 +3,7 @@
 ## Purpose
 
 让 Pi Agent 更可靠地为远程 Linux 长任务建立进程树监控，并提供一次调用即可完成任务启动、PID 获取和 Watcher 登记的安全接口。
-
 ## Requirements
-
 ### Requirement: 强制提示 Agent 登记远程长任务
 系统 SHALL 在 `pi_ssh_target` 激活时明确要求 Agent：启动预计长期运行或脱离当前 SSH 命令的远程 Linux 任务后，必须在同一 Agent run 内登记 Watcher，或明确说明无法登记的原因。
 
@@ -70,7 +68,7 @@
 - **THEN** 系统按稳定标识或内容摘要跳过重复审计
 
 ### Requirement: start action 使用结构化启动参数
-`pi_ssh_target` SHALL 提供 `start` action，接受 SSH destination、`command`、`args[]`，并可接受 `description`、`cwd`、环境变量、SSH 参数、扫描间隔、启动超时、日志路径、结果路径和 note。
+`pi_ssh_target` SHALL 提供 `start` action，接受 SSH destination、`command`、`args[]`，并可接受 `description`、`cwd`、环境变量、SSH 参数、`password`、扫描间隔、启动超时、日志路径、结果路径和 note。
 
 #### Scenario: 使用参数数组启动脚本
 - **WHEN** Agent 提交 `command: "python3"` 和独立的脚本参数数组
@@ -79,6 +77,11 @@
 #### Scenario: 显式使用 shell
 - **WHEN** 调用方确实需要管道、重定向或变量展开
 - **THEN** 调用方必须显式使用 `command: "bash"` 及对应 `args`，系统不自动引入 shell
+
+#### Scenario: 使用密码认证启动脚本
+- **WHEN** Agent 提交 `command: "python3"`、独立脚本参数数组和 `password`
+- **THEN** 系统使用该密码通过 SSH 认证，按 argv 边界启动远程进程
+- **THEN** 系统返回 `started_and_watched`、根 PID、watch ID 和日志路径
 
 ### Requirement: start action 单次调用建立任务和 Watcher
 `start` action SHALL 在一次工具调用中启动远程非交互进程、取得准确根 PID、建立稳定进程身份并启动 Watcher。工具 SHALL 仅在启动结果明确后返回。
@@ -119,3 +122,4 @@
 #### Scenario: Watcher SSH 异常关闭
 - **WHEN** Watcher SSH 连接在任务运行期间异常关闭
 - **THEN** 已启动任务不因标准流或控制终端关闭而被系统主动终止
+
