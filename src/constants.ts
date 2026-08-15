@@ -23,6 +23,9 @@ export const MAX_ARG_LENGTH = 4000;
 export const MAX_ENV = 100;
 export const MAX_ENV_VALUE_LENGTH = 4000;
 export const STDERR_TAIL_BYTES = 2000;
+/** 默认 SSH 应用层保活参数：每 30 秒发保活，连续 3 次无响应（约 90 秒）客户端退出。
+ * 放在用户 ssh_args 之后：OpenSSH 对重复 -o 选项第一个生效，因此用户同名选项（在前）可覆盖默认值。 */
+export const DEFAULT_SSH_KEEPALIVE_ARGS = ["-o", "ServerAliveInterval=30", "-o", "ServerAliveCountMax=3"];
 export const PROTOCOL_PREFIX = "@@PI_SSH_TARGET@@";
 export const LIFECYCLE_ENTRY_TYPE = "pi-ssh-target-lifecycle";
 export const AUDIT_ENTRY_TYPE = "pi-ssh-target-audit";

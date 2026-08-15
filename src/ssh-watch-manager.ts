@@ -4,7 +4,7 @@ import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { PROTOCOL_PREFIX, STDERR_TAIL_BYTES } from "./constants.js";
+import { PROTOCOL_PREFIX, STDERR_TAIL_BYTES, DEFAULT_SSH_KEEPALIVE_ARGS } from "./constants.js";
 import { consumeLines, parseProtocolLine } from "./protocol.js";
 import type {
   ActiveWatch,
@@ -52,7 +52,9 @@ export class SshWatchManager {
   ): Promise<WatcherReadyEvent | StartManagerResult> {
     if (signal?.aborted) return Promise.reject(new Error("watch 启动已取消"));
     if (this.active.has(config.watch_id)) throw new Error(`watch 已在运行: ${config.watch_id}`);
-    const args = [...config.ssh_args, "--", config.host, "python3", "-"];
+    // 默认 keepalive 放在用户 ssh_args 之后：OpenSSH 对重复 -o 选项第一个生效，
+    // 因此用户提供的同名选项（在前）生效，未提供时默认值生效。
+    const args = [...config.ssh_args, ...DEFAULT_SSH_KEEPALIVE_ARGS, "--", config.host, "python3", "-"];
     // 密码认证：askpass 脚本只读环境变量，脚本本身不含密码明文。
     const askpassPath = config.password === undefined ? undefined : createAskpassScript();
     const env =
