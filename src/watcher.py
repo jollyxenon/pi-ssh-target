@@ -5,8 +5,6 @@ import errno
 import glob
 import json
 import os
-import re
-import subprocess
 import sys
 import tempfile
 import time
@@ -168,7 +166,6 @@ class Watcher:
         sleeper: Callable[[float], None] = time.sleep,
         output: TextIO = sys.stdout,
         clock_ticks: Optional[int] = None,
-        popener: Callable[..., Any] = subprocess.Popen,
     ) -> None:
         """Builds watcher with injectable filesystem, time, and output dependencies."""
         self.config = validate_config(config)
@@ -177,13 +174,11 @@ class Watcher:
         self.clock = clock
         self.sleeper = sleeper
         self.output = output
-        self.popener = popener
         self.boot_id = ""
         self.btime = 0
         self.processes: Dict[int, ProcessRecord] = {}
         self.terminal: Optional[str] = None
         self.last_scanned_at: Optional[str] = None
-        self.launched_process: Optional[Any] = None
 
     @property
     def state_path(self) -> Path:
@@ -201,49 +196,9 @@ class Watcher:
         return self.state_path.parent
 
     def prepare_system(self) -> None:
-        """Reads stable system identity before a task can be launched."""
+        """Reads stable system identity before monitoring a process tree."""
         self.boot_id = self.proc.read_boot_id()
         self.btime = self.proc.read_btime()
-
-    def launch(self) -> None:
-        """Starts one detached non-interactive process and emits no event itself."""
-        try:
-            self._ensure_state_dir()
-        except WatcherInterrupt as error:
-            raise WatcherInterrupt("launch_failed", error.message) from error
-        stdout_path = Path(self.config.get("stdout_path") or self.state_dir / f"{self.config['watch_id']}.stdout.log")
-        stderr_path = Path(self.config.get("stderr_path") or self.state_dir / f"{self.config['watch_id']}.stderr.log")
-        stdout_file: Optional[TextIO] = None
-        stderr_file: Optional[TextIO] = None
-        try:
-            stdout_file = self._open_log(stdout_path)
-            stderr_file = self._open_log(stderr_path)
-            environment = os.environ.copy()
-            environment.update(self.config.get("env", {}))
-            child = self.popener(
-                [self.config["command"], *self.config["args"]],
-                cwd=self.config.get("cwd"),
-                env=environment,
-                stdin=subprocess.DEVNULL,
-                stdout=stdout_file,
-                stderr=stderr_file,
-                start_new_session=True,
-                shell=False,
-            )
-        except OSError as error:
-            raise WatcherInterrupt("launch_failed", f"cannot launch process: {error.strerror or error}") from error
-        finally:
-            if stdout_file is not None:
-                stdout_file.close()
-            if stderr_file is not None:
-                stderr_file.close()
-        pid = getattr(child, "pid", None)
-        if not isinstance(pid, int) or pid <= 0:
-            raise WatcherInterrupt("launch_failed", "launcher returned an invalid PID")
-        self.launched_process = child
-        self.config["root_pid"] = pid
-        self.config["stdout_path"] = str(stdout_path)
-        self.config["stderr_path"] = str(stderr_path)
 
     def initialize(self) -> None:
         """Loads an existing watch or records initial root identity and state."""
@@ -263,8 +218,6 @@ class Watcher:
 
     def scan(self) -> bool:
         """Checks known identities, recursively finds descendants, and persists results."""
-        if self.launched_process is not None and hasattr(self.launched_process, "poll"):
-            self.launched_process.poll()
         active: List[int] = []
         for record in list(self.processes.values()):
             if record.ended_at is not None:
@@ -303,24 +256,11 @@ class Watcher:
         return finished
 
     def run(self, max_scans: Optional[int] = None) -> int:
-        """Runs watcher lifecycle and emits launch, ready, and terminal events."""
+        """Runs watcher lifecycle and emits ready and terminal events."""
         try:
             self.prepare_system()
-            if "command" in self.config:
-                self.launch()
-                self.emit(
-                    "launched",
-                    stdout_path=self.config["stdout_path"],
-                    stderr_path=self.config["stderr_path"],
-                )
             self.initialize()
-            ready_extra = {}
-            if "command" in self.config:
-                ready_extra = {
-                    "stdout_path": self.config["stdout_path"],
-                    "stderr_path": self.config["stderr_path"],
-                }
-            self.emit("ready", **ready_extra)
+            self.emit("ready")
             if self.terminal == "finish":
                 self.emit("finish")
                 return 0
@@ -404,28 +344,13 @@ class Watcher:
         except OSError as error:
             raise WatcherInterrupt("state_write_error", f"cannot create state directory: {error.strerror or error}") from error
 
-    def _open_log(self, path: Path) -> TextIO:
-        """Creates one append-only private log file before launching a task."""
-        try:
-            path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-            descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
-            os.fchmod(descriptor, 0o600)
-            return os.fdopen(descriptor, "a", encoding="utf-8")
-        except OSError as error:
-            raise WatcherInterrupt("launch_failed", f"cannot open log file {path}: {error.strerror or error}") from error
-
     def _write_state(self) -> None:
         """Atomically replaces private JSON state file after every valid watcher update."""
         try:
             self._ensure_state_dir()
-            persisted_config = {
-                key: value
-                for key, value in self.config.items()
-                if key not in {"command", "args", "cwd", "env", "stdout_path", "stderr_path"}
-            }
             state = {
                 "version": STATE_VERSION,
-                "config": persisted_config,
+                "config": dict(self.config),
                 "boot_id": self.boot_id,
                 "processes": [asdict(self.processes[pid]) for pid in sorted(self.processes)],
                 "last_scanned_at": self.last_scanned_at,
@@ -465,35 +390,7 @@ def validate_config(config: Mapping[str, Any]) -> Dict[str, Any]:
         if not isinstance(value, str) or not value or invalid_path_component:
             raise WatcherInterrupt("config_error", f"{key} must be a non-empty string")
     root_pid = result.get("root_pid", result.get("pid"))
-    is_launch = "command" in result
-    if is_launch:
-        command = result.get("command")
-        args = result.get("args")
-        if not isinstance(command, str) or not command or len(command) > 1000:
-            raise WatcherInterrupt("config_error", "command must be a non-empty string of at most 1000 characters")
-        if not isinstance(args, list) or len(args) > 100 or any(
-            not isinstance(argument, str) or len(argument) > 4000 for argument in args
-        ):
-            raise WatcherInterrupt("config_error", "args must contain at most 100 bounded strings")
-        cwd = result.get("cwd")
-        if cwd is not None and (not isinstance(cwd, str) or not cwd or len(cwd) > 1000):
-            raise WatcherInterrupt("config_error", "cwd must be a non-empty bounded string")
-        environment = result.get("env", {})
-        if not isinstance(environment, Mapping) or len(environment) > 100:
-            raise WatcherInterrupt("config_error", "env must be an object with at most 100 entries")
-        for name, value in environment.items():
-            if not isinstance(name, str) or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name) is None:
-                raise WatcherInterrupt("config_error", "env contains an invalid variable name")
-            if not isinstance(value, str) or len(value) > 4000:
-                raise WatcherInterrupt("config_error", "env values must be bounded strings")
-        for key in ("stdout_path", "stderr_path"):
-            path = result.get(key)
-            if path is not None and (not isinstance(path, str) or not path or len(path) > 1000):
-                raise WatcherInterrupt("config_error", f"{key} must be a non-empty bounded string")
-        result["args"] = list(args)
-        result["env"] = dict(environment)
-        root_pid = 0
-    if not isinstance(root_pid, int) or (root_pid <= 0 and not is_launch):
+    if not isinstance(root_pid, int) or root_pid <= 0:
         raise WatcherInterrupt("config_error", "root_pid must be a positive integer")
     interval_seconds = result.get("interval_seconds", 5)
     if not isinstance(interval_seconds, (int, float)) or interval_seconds <= 0:

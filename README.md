@@ -1,6 +1,6 @@
 # pi-ssh-target
 
-`pi-ssh-target` 是一个用于 Pi 的 SSH 进程监控插件。Agent 可以通过一次 `start` 调用启动远程非交互任务并立即建立进程树监控，也可以把已经运行任务的根 PID 交给 `watch`。任务结束、Watcher 中断或 SSH 连接异常关闭时，插件会通过 `steer` 唤醒原来的 Pi session。
+`pi-ssh-target` 是一个用于 Pi 的 SSH 进程监控插件。Agent 先通过普通 SSH 启动远程任务并获取根 PID，再把 PID 交给 `pi_ssh_watch` 建立进程树监控。任务结束、Watcher 中断或 SSH 连接异常关闭时，插件会通过 `steer` 唤醒原来的 Pi session。
 
 插件还会在一次 Agent run 完全结束后创建审计快照，并在后台异步检查本轮是否漏建监控。审计不会阻塞下一轮问答，也不会向正式 Agent 上下文注入补救消息；只有 Judge 给出的 host、PID 和 SSH 参数能由工具证据验证时，extension 才会静默补建 Watcher。
 
@@ -56,79 +56,16 @@ pi -e .
 
 ## 工具用法
 
-Package 注册一个工具：`pi_ssh_target`。工具有四种 action：`start`、`watch`、`cancel`、`list`。
+Package 注册三个工具：`pi_ssh_watch`（监控已运行的远程进程树）、`pi_ssh_cancel`（取消监控）、`pi_ssh_list`（查看监控列表）。工具不负责启动远程任务——启动由 Agent 用普通 SSH 完成。
 
-### `start`
+### `pi_ssh_watch`
 
-`start` 在一次工具调用中完成远程任务启动、PID 获取和 Watcher 建立。它只支持非交互任务，不分配 TTY，stdin 使用 `/dev/null`。
-
-必填参数：
+对已运行的远程进程树建立监控。必填参数：
 
 | 参数 | 类型 | 说明 |
 |---|---|---|
-| `action` | `"start"` | 固定值 |
-| `host` | string | SSH destination |
-| `command` | string | 远程可执行程序或脚本解释器 |
-| `args` | string[] | 独立 argv 参数数组，不经过隐式 shell |
-
-可选启动参数：
-
-| 参数 | 说明 |
-|---|---|
-| `cwd` | 远程工作目录 |
-| `env` | 合并到远程进程环境的字符串键值对 |
-| `stdout_path` | stdout 日志路径 |
-| `stderr_path` | stderr 日志路径 |
-
-`ssh_args`、`password`、`interval_seconds`、`startup_timeout_seconds`、`result_paths`、`log_paths`、`description` 和 `note` 与 `watch` 相同。
-
-示例：
-
-```json
-{
-  "action": "start",
-  "host": "gpu01",
-  "description": "训练实验 17",
-  "command": "python3",
-  "args": ["/data/train.py", "--epochs", "100"],
-  "cwd": "/data/project",
-  "env": { "CUDA_VISIBLE_DEVICES": "0" }
-}
-```
-
-参数保持 argv 边界。需要管道、变量展开等 shell 功能时，必须显式传入：
-
-```json
-{
-  "command": "bash",
-  "args": ["-lc", "python3 train.py | tee run.log"]
-}
-```
-
-未指定日志路径时，默认写入：
-
-```text
-/tmp/pi-ssh-target-<uid>/<session-id>/<watch-id>.stdout.log
-/tmp/pi-ssh-target-<uid>/<session-id>/<watch-id>.stderr.log
-```
-
-状态目录权限为 `0700`，日志文件权限为 `0600`。实际日志路径会加入 `log_paths` 并出现在终态通知中。插件不自动轮转或删除日志。
-
-`start` 返回三种结果：
-
-- `started_and_watched`：任务已启动，Watcher 已 ready。
-- `started_unwatched`：任务已启动，但 Watcher 未建立。插件保留任务并唤醒 Agent 使用已有 host/PID 补建 `watch`，不会重新启动任务。
-- `launch_failed`：任务没有成功启动，没有活跃 Watcher。
-
-### `watch`
-
-必填参数：
-
-| 参数 | 类型 | 说明 |
-|---|---|---|
-| `action` | `"watch"` | 固定值 |
 | `host` | string | SSH destination，例如 `gpu01` 或 `user@example.com` |
-| `pid` | integer | 远程根 PID |
+| `pid` | integer | 远程根 PID（启动任务时捕获，见下方示例） |
 可选参数：
 
 | 参数 | 默认值 | 说明 |
@@ -146,7 +83,6 @@ Package 注册一个工具：`pi_ssh_target`。工具有四种 action：`start`�
 
 ```json
 {
-  "action": "watch",
   "host": "gpu01",
   "pid": 24831,
   "description": "训练实验 17",
@@ -165,17 +101,16 @@ Package 注册一个工具：`pi_ssh_target`。工具有四种 action：`start`�
 ssh <ssh_args...> -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -- <host> python3 -
 ```
 
-默认保活让 SSH 客户端每 30 秒经现有加密通道发送应用层保活消息，连续 3 次无响应（约 90 秒）后主动退出，此时插件按无合法终态退出合成 `close` 并 steer。弱网场景（如校园 VPN 断连导致 TCP 半开）下，这能保证断连在约 90 秒内被通报，而不是让 ssh 进程无限挂起。默认参数放在用户 `ssh_args` 之后，OpenSSH 对重复 `-o` 选项第一个生效，因此 Agent 可通过 `ssh_args` 提供同名 `-o` 覆盖默认值（例如 `"-o", "ServerAliveInterval=60"`）。保活只对新建的 SSH 子进程生效，升级前已登记的 watch 不会自动获得保活，需要重新 `start`/`watch`。
+默认保活让 SSH 客户端每 30 秒经现有加密通道发送应用层保活消息，连续 3 次无响应（约 90 秒）后主动退出，此时插件按无合法终态退出合成 `close` 并 steer。弱网场景（如校园 VPN 断连导致 TCP 半开）下，这能保证断连在约 90 秒内被通报，而不是让 ssh 进程无限挂起。默认参数放在用户 `ssh_args` 之后，OpenSSH 对重复 `-o` 选项第一个生效，因此 Agent 可通过 `ssh_args` 提供同名 `-o` 覆盖默认值（例如 `"-o", "ServerAliveInterval=60"`）。保活只对新建的 SSH 子进程生效，升级前已登记的 watch 不会自动获得保活，需要重新 `pi_ssh_watch`。
 
 参数通过 `child_process.spawn()` 作为独立 argv 传递，不经过本地 shell。Python Watcher 源码和配置从 stdin 发送，远程主机不需要预装本 package。
 
 同一个 `host + pid` 可以重复登记。每次调用都会生成独立的 `watch_id`，并占用一条本机 SSH 连接和一个远程 Python 进程。
 
-### `cancel`
+### `pi_ssh_cancel`
 
 ```json
 {
-  "action": "cancel",
   "watch_id": "4ff85e38-47f4-4bc1-a360-bd47e875e242"
 }
 ```
@@ -187,21 +122,20 @@ ssh <ssh_args...> -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -- <host> p
 - 删除远程状态文件；
 - 发送 `close` steer。
 
-### `list`
+### `pi_ssh_list`
 
 ```json
 {
-  "action": "list",
   "active_limit": 3,
   "terminal_limit": 0
 }
 ```
 
-`list` 只读取当前 Pi session 的生命周期和后台审计记录，不连接远程主机，也不读取远程状态文件。默认分别返回最近更新的 3 个活跃 watch、3 个 `started_unwatched` 记录，以及 0 个终态 watch 和审计结果；数量可通过现有 limit 参数在 0–100 范围内覆盖。
+`list` 只读取当前 Pi session 的生命周期和后台审计记录，不连接远程主机，也不读取远程状态文件。默认返回最近更新的 3 个活跃 watch 和 0 个终态 watch 与审计结果；数量可通过 limit 参数在 0–100 范围内覆盖。
 
 ## 自动遗漏审计
 
-主动调用 `start/watch` 仍是首选流程。扩展同时在 `agent_start` 到 `agent_settled` 之间收集工具证据；`agent_settled` 只创建不可变快照并放入 session 内的串行后台队列，不等待 Judge 完成。用户可以立即开始下一轮问答。
+主动调用 `pi_ssh_watch` 仍是首选流程。扩展同时在 `agent_start` 到 `agent_settled` 之间收集工具证据；`agent_settled` 只创建不可变快照并放入 session 内的串行后台队列，不等待 Judge 完成。用户可以立即开始下一轮问答。
 
 默认策略是：
 
@@ -338,22 +272,20 @@ pi.sendMessage(message, { triggerTurn: true, deliverAs: "steer" })
 
 优先流程：
 
-1. Agent 调用 `pi_ssh_target start`，传入远程 command 和 args。
-2. 工具返回 `started_and_watched` 后，Agent 可以继续其他工作或结束当前 turn。
-3. 如果返回 `started_unwatched`，Agent 使用返回的 host/PID 调用 `watch`，不得重复调用 `start`。
-4. 远程进程树进入 `finish`、`interrupt` 或 `close` 后，插件 steer 当前 session。
-5. Agent 根据提示检查日志和产物，再继续原计划。
+1. Agent 通过普通 SSH 启动远程长任务并获取远程根 PID，例如：
 
-已有任务流程：
+   ```bash
+   ssh host 'nohup python3 train.py > /tmp/out.log 2>&1 & echo PID=$!'
+   ```
 
-1. Agent 通过普通 SSH 启动长任务并获得远程根 PID。
-2. Agent 在同一 run 调用 `pi_ssh_target watch`；无法登记时必须说明原因。
-3. 后续终态处理与上面相同。
+2. Agent 在同一 run 调用 `pi_ssh_watch`，传入 `host` 和 `pid`；无法登记时必须说明原因。
+3. 远程进程树进入 `finish`、`interrupt` 或 `close` 后，插件 steer 当前 session。
+4. Agent 根据提示检查日志和产物，再继续原计划。
 
 ## 限制
 
-- `start` 只支持非交互任务，不提供 TTY，stdin 固定为 `/dev/null`。
-- `start` 不解析 scheduler 作业 ID，也不把 `sbatch` 自动映射为执行节点 PID。
+- 工具不负责启动远程任务；启动、stdout/stderr 重定向和环境变量由 Agent 的 SSH 调用自行完成。
+- 不解析 scheduler 作业 ID，也不把 `sbatch` 自动映射为执行节点 PID。
 - 后台 Judge 依赖所选模型可用；失败时只记录审计错误，不会唤醒正式 Agent。
 - 完整上下文审计会把当前有效对话发送给所选 provider，可能包含工具输出中的敏感信息。
 - 不提供 SSH 或 Watcher 自动重试。

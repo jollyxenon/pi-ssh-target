@@ -1,4 +1,3 @@
-import { statSync } from "node:fs";
 import { spawn, type ChildProcess } from "node:child_process";
 import { resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -9,7 +8,7 @@ let target: ChildProcess | undefined;
 
 /** Minimal Pi double that resolves when terminal steer reaches the session. */
 class EndToEndPi {
-  public tool: any;
+  public tools: Record<string, any> = {};
   public entries: any[] = [];
   private resolveMessage!: (message: any) => void;
   public terminalMessage = new Promise<any>((resolveMessage) => {
@@ -22,7 +21,7 @@ class EndToEndPi {
   }
 
   public registerTool(tool: any): void {
-    this.tool = tool;
+    this.tools[tool.name] = tool;
   }
 
   public appendEntry(customType: string, data: any): void {
@@ -55,19 +54,20 @@ afterEach(() => {
 });
 
 describe("Linux/WSL local end-to-end", () => {
-  it("starts and watches a real detached process with private default logs", async () => {
+  it("watches a real detached process and steers Pi after finish", async () => {
     process.env.PATH = `${resolve("tests/fixtures/local-ssh")}:${originalPath ?? ""}`;
+    target = spawn("python3", ["-c", "import time; print('started', flush=True); time.sleep(0.2)"]);
+    if (!target.pid) throw new Error("failed to start target process");
+
     const pi = new EndToEndPi();
     piSshTarget(pi as any);
     await pi.startSession();
-    const startResult = await pi.tool.execute(
+    const watchResult = await pi.tools.pi_ssh_watch.execute(
       "e2e-start",
       {
-        action: "start",
         host: "local-test",
+        pid: target.pid,
         description: "real-start",
-        command: "python3",
-        args: ["-c", "import time; print('started', flush=True); time.sleep(0.2)"],
         interval_seconds: 0.02,
         startup_timeout_seconds: 2,
       },
@@ -75,10 +75,7 @@ describe("Linux/WSL local end-to-end", () => {
       undefined,
       {},
     );
-    expect(startResult.details.outcome).toBe("started_and_watched");
-    expect(startResult.details.launch.pid).toBeGreaterThan(0);
-    expect(statSync(startResult.details.launch.stdout_path).mode & 0o777).toBe(0o600);
-    expect(statSync(startResult.details.launch.stderr_path).mode & 0o777).toBe(0o600);
+    expect(watchResult.details.error).toBeUndefined();
 
     const terminal = await Promise.race([
       pi.terminalMessage,
@@ -100,10 +97,9 @@ describe("Linux/WSL local end-to-end", () => {
     const pi = new EndToEndPi();
     piSshTarget(pi as any);
     await pi.startSession();
-    const watchResult = await pi.tool.execute(
+    const watchResult = await pi.tools.pi_ssh_watch.execute(
       "e2e-call",
       {
-        action: "watch",
         host: "local-test",
         pid: target.pid,
         description: "real-process-tree",

@@ -33,7 +33,7 @@ function isLifecycleRecord(value: unknown): value is WatchLifecycleRecord {
     !!record.config &&
     typeof record.config === "object" &&
     typeof record.config.watch_id === "string" &&
-    (["started", "started_unwatched", "finish", "interrupt", "close", "cancelled"] as const).includes(
+    (["started", "finish", "interrupt", "close", "cancelled"] as const).includes(
       record.kind as never,
     )
   );

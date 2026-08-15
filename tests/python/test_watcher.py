@@ -80,7 +80,6 @@ class WatcherTestCase(unittest.TestCase):
         self,
         config: dict[str, object],
         output: io.StringIO | None = None,
-        popener: object = watcher.subprocess.Popen,
     ) -> watcher.Watcher:
         """Builds watcher against fake filesystem and deterministic clock."""
         return watcher.Watcher(
@@ -91,7 +90,6 @@ class WatcherTestCase(unittest.TestCase):
             sleeper=lambda _: None,
             output=output or io.StringIO(),
             clock_ticks=100,
-            popener=popener,
         )
 
     def protocol_events(self, output: io.StringIO) -> list[dict[str, object]]:
@@ -220,84 +218,6 @@ class WatcherTestCase(unittest.TestCase):
         mismatch = self.make_watcher(self.config(resume=True), mismatch_output)
         self.assertEqual(mismatch.run(max_scans=1), 1)
         self.assertEqual(self.protocol_events(mismatch_output)[-1]["error_code"], "boot_id_mismatch")
-
-    def test_structured_launch_uses_argv_and_private_default_logs(self) -> None:
-        """Launches with shell disabled and emits private default log paths before ready."""
-        self.write_process(321, start_ticks=20)
-        calls: list[tuple[list[str], dict[str, object]]] = []
-
-        class FakeChild:
-            pid = 321
-
-        def fake_popen(argv: list[str], **kwargs: object) -> FakeChild:
-            calls.append((argv, kwargs))
-            return FakeChild()
-
-        output = io.StringIO()
-        instance = self.make_watcher(
-            self.config(root_pid=0, command="python3", args=["train.py", "a; b"], env={"GPU": "0"}),
-            output,
-            fake_popen,
-        )
-        self.assertEqual(instance.run(max_scans=1), 0)
-        events = self.protocol_events(output)
-        self.assertEqual([event["event"] for event in events], ["launched", "ready"])
-        self.assertEqual(calls[0][0], ["python3", "train.py", "a; b"])
-        self.assertIs(calls[0][1]["shell"], False)
-        self.assertIs(calls[0][1]["start_new_session"], True)
-        self.assertEqual(calls[0][1]["env"]["GPU"], "0")
-        stdout_path = Path(events[0]["stdout_path"])
-        stderr_path = Path(events[0]["stderr_path"])
-        self.assertEqual(stat_module.S_IMODE(stdout_path.stat().st_mode), 0o600)
-        self.assertEqual(stat_module.S_IMODE(stderr_path.stat().st_mode), 0o600)
-        self.assertEqual(stat_module.S_IMODE(instance.state_dir.stat().st_mode), 0o700)
-        persisted_config = json.loads(instance.state_path.read_text(encoding="utf-8"))["config"]
-        for launch_only_key in ("command", "args", "cwd", "env", "stdout_path", "stderr_path"):
-            self.assertNotIn(launch_only_key, persisted_config)
-
-    def test_launch_failure_emits_interrupt_without_launched(self) -> None:
-        """Reports launch_failed before any PID exists or lifecycle can become active."""
-        def missing_command(_argv: list[str], **_kwargs: object) -> object:
-            raise FileNotFoundError(errno.ENOENT, "missing")
-
-        output = io.StringIO()
-        instance = self.make_watcher(
-            self.config(root_pid=0, command="missing", args=[]),
-            output,
-            missing_command,
-        )
-        self.assertEqual(instance.run(max_scans=1), 1)
-        events = self.protocol_events(output)
-        self.assertEqual([event["event"] for event in events], ["interrupt"])
-        self.assertEqual(events[0]["error_code"], "launch_failed")
-        self.assertEqual(events[0]["root_pid"], 0)
-
-    def test_custom_log_paths_are_returned(self) -> None:
-        """Uses caller-provided log paths while keeping private file modes."""
-        self.write_process(322, start_ticks=21)
-
-        class FakeChild:
-            pid = 322
-
-        stdout_path = self.root / "logs" / "custom.out"
-        stderr_path = self.root / "logs" / "custom.err"
-        output = io.StringIO()
-        instance = self.make_watcher(
-            self.config(
-                root_pid=0,
-                command="worker",
-                args=[],
-                stdout_path=str(stdout_path),
-                stderr_path=str(stderr_path),
-            ),
-            output,
-            lambda _argv, **_kwargs: FakeChild(),
-        )
-        self.assertEqual(instance.run(max_scans=1), 0)
-        launched = self.protocol_events(output)[0]
-        self.assertEqual((launched["stdout_path"], launched["stderr_path"]), (str(stdout_path), str(stderr_path)))
-        self.assertEqual(stat_module.S_IMODE(stdout_path.stat().st_mode), 0o600)
-        self.assertEqual(stat_module.S_IMODE(stderr_path.stat().st_mode), 0o600)
 
     def test_ready_finish_and_initial_missing_pid_protocol(self) -> None:
         """Emits prefixed ready then immediate finish after valid missing-root registration."""

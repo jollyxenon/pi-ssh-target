@@ -1,5 +1,4 @@
 import type {
-  StartInput,
   WatchConfig,
   WatchInput,
   WatchMetadataInput,
@@ -17,11 +16,6 @@ export const MAX_NOTE = 2000;
 export const MAX_PASSWORD_LENGTH = 512;
 export const MAX_PATHS = 20;
 export const MAX_PATH_LENGTH = 1000;
-export const MAX_COMMAND_LENGTH = 1000;
-export const MAX_ARGS = 100;
-export const MAX_ARG_LENGTH = 4000;
-export const MAX_ENV = 100;
-export const MAX_ENV_VALUE_LENGTH = 4000;
 export const STDERR_TAIL_BYTES = 2000;
 /** 默认 SSH 应用层保活参数：每 30 秒发保活，连续 3 次无响应（约 90 秒）客户端退出。
  * 放在用户 ssh_args 之后：OpenSSH 对重复 -o 选项第一个生效，因此用户同名选项（在前）可覆盖默认值。 */
@@ -69,48 +63,18 @@ export function validateWatchInput(input: WatchInput): string | undefined {
   return undefined;
 }
 
-/** Validates structured remote launch input before any SSH process is created. */
-export function validateStartInput(input: StartInput): string | undefined {
-  const metadataError = validateMetadata(input);
-  if (metadataError) return metadataError;
-  if (!input.command) return "command 不能为空";
-  if (input.command.length > MAX_COMMAND_LENGTH) return `command 最多 ${MAX_COMMAND_LENGTH} 字符`;
-  if (!Array.isArray(input.args)) return "args 必须是字符串数组";
-  if (input.args.length > MAX_ARGS) return `args 最多 ${MAX_ARGS} 项`;
-  if (input.args.some((argument) => typeof argument !== "string" || argument.length > MAX_ARG_LENGTH)) {
-    return `args 每项必须是字符串且最多 ${MAX_ARG_LENGTH} 字符`;
-  }
-  for (const [name, path] of [
-    ["cwd", input.cwd],
-    ["stdout_path", input.stdout_path],
-    ["stderr_path", input.stderr_path],
-  ] as const) {
-    if (path !== undefined && (!path || path.length > MAX_PATH_LENGTH))
-      return `${name} 必须非空且最多 ${MAX_PATH_LENGTH} 字符`;
-  }
-  const entries = Object.entries(input.env ?? {});
-  if (entries.length > MAX_ENV) return `env 最多 ${MAX_ENV} 项`;
-  for (const [name, value] of entries) {
-    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) return `env 变量名无效: ${name}`;
-    if (typeof value !== "string" || value.length > MAX_ENV_VALUE_LENGTH) {
-      return `env 变量值必须是字符串且最多 ${MAX_ENV_VALUE_LENGTH} 字符`;
-    }
-  }
-  return undefined;
-}
-
 /** Creates the normalized complete configuration stored for restoration. */
 export function normalizeWatchConfig(
-  input: WatchInput | StartInput,
+  input: WatchInput,
   watchId: string,
   sessionId: string,
   resume = false,
 ): WatchConfig {
-  const base: WatchConfig = {
+  return {
     watch_id: watchId,
     session_id: sessionId,
     host: input.host,
-    pid: input.action === "watch" ? input.pid : 0,
+    pid: input.pid,
     ...(input.description === undefined ? {} : { description: input.description }),
     ssh_args: [...(input.ssh_args ?? [])],
     ...(input.password === undefined ? {} : { password: input.password }),
@@ -121,18 +85,6 @@ export function normalizeWatchConfig(
     ...(input.note === undefined ? {} : { note: input.note }),
     resume,
   };
-  if (input.action === "start") {
-    return {
-      ...base,
-      command: input.command,
-      args: [...input.args],
-      ...(input.cwd === undefined ? {} : { cwd: input.cwd }),
-      ...(input.env === undefined ? {} : { env: { ...input.env } }),
-      ...(input.stdout_path === undefined ? {} : { stdout_path: input.stdout_path }),
-      ...(input.stderr_path === undefined ? {} : { stderr_path: input.stderr_path }),
-    };
-  }
-  return base;
 }
 
 /** Returns true for states that must never be treated as active watches. */

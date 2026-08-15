@@ -8,7 +8,6 @@ import { PROTOCOL_PREFIX, STDERR_TAIL_BYTES, DEFAULT_SSH_KEEPALIVE_ARGS } from "
 import { consumeLines, parseProtocolLine } from "./protocol.js";
 import type {
   ActiveWatch,
-  StartManagerResult,
   WatchCloseEvent,
   WatchConfig,
   WatcherFinishEvent,
@@ -36,20 +35,14 @@ export class SshWatchManager {
 
   /** Starts SSH for an existing PID and resolves after ready. */
   public start(config: WatchConfig, signal?: AbortSignal): Promise<WatcherReadyEvent> {
-    return this.startInternal(config, false, signal) as Promise<WatcherReadyEvent>;
+    return this.startInternal(config, signal);
   }
 
-  /** Starts one remote process and resolves with watched or partial-success state. */
-  public startLaunch(config: WatchConfig, signal?: AbortSignal): Promise<StartManagerResult> {
-    return this.startInternal(config, true, signal) as Promise<StartManagerResult>;
-  }
-
-  /** Runs the shared SSH protocol while distinguishing launch from watch startup. */
+  /** Runs the SSH protocol and resolves after the remote watcher is ready. */
   private startInternal(
     config: WatchConfig,
-    launchMode: boolean,
     signal?: AbortSignal,
-  ): Promise<WatcherReadyEvent | StartManagerResult> {
+  ): Promise<WatcherReadyEvent> {
     if (signal?.aborted) return Promise.reject(new Error("watch 启动已取消"));
     if (this.active.has(config.watch_id)) throw new Error(`watch 已在运行: ${config.watch_id}`);
     // 默认 keepalive 放在用户 ssh_args 之后：OpenSSH 对重复 -o 选项第一个生效，
@@ -81,31 +74,14 @@ export class SshWatchManager {
     this.active.set(config.watch_id, active);
     this.ownership.set(config.watch_id, active);
 
-    return new Promise<WatcherReadyEvent | StartManagerResult>((resolve, reject) => {
+    return new Promise<WatcherReadyEvent>((resolve, reject) => {
       let stdoutRest = "";
       let settled = false;
       let readyEvent: WatcherReadyEvent | undefined;
 
-      /** Ends local startup after remote launch without terminating the task. */
-      const resolveUnwatched = (error: Error): boolean => {
-        if (!launchMode || !active.launched || settled) return false;
-        settled = true;
-        clearTimeout(timeout);
-        active.intentionalClose = true;
-        child.kill();
-        this.deleteIfCurrent(active);
-        this.releaseOwnership(active);
-        resolve({
-          outcome: "started_unwatched",
-          launched: active.launched,
-          error: error.message,
-        });
-        return true;
-      };
-
-      /** Rejects startup before launch and closes only the local SSH child. */
+      /** Rejects startup and closes only the local SSH child. */
       const failStartup = (error: Error) => {
-        if (settled || resolveUnwatched(error)) return;
+        if (settled) return;
         settled = true;
         clearTimeout(timeout);
         active.intentionalClose = true;
@@ -151,39 +127,14 @@ export class SshWatchManager {
             continue;
           }
           if (!event || event.watch_id !== config.watch_id) continue;
-          if (event.event === "launched") {
-            if (!launchMode || active.launched) continue;
-            active.launched = event;
-            config.pid = event.root_pid;
-            config.stdout_path = event.stdout_path;
-            config.stderr_path = event.stderr_path;
-            continue;
-          }
           if (event.event === "ready") {
             if (active.ready) continue;
-            if (launchMode && !active.launched) {
-              failStartup(new Error("远程启动协议缺少 launched 事件"));
-              continue;
-            }
             active.ready = true;
             readyEvent = event;
             if (!settled) {
               settled = true;
               clearTimeout(timeout);
-              if (launchMode) {
-                const launched = active.launched;
-                if (!launched) {
-                  failStartup(new Error("远程启动协议缺少 launched 事件"));
-                  continue;
-                }
-                resolve({
-                  outcome: "started_and_watched",
-                  ready: event,
-                  launched,
-                });
-              } else {
-                resolve(event);
-              }
+              resolve(event);
             }
             continue;
           }
@@ -208,11 +159,9 @@ export class SshWatchManager {
         this.deleteIfCurrent(active);
         if (!settled && !active.ready) {
           const error = new Error(this.startupExitMessage(code, closeSignal, active.stderrTail));
-          if (!resolveUnwatched(error)) {
-            settled = true;
-            this.releaseOwnership(active);
-            reject(error);
-          }
+          settled = true;
+          this.releaseOwnership(active);
+          reject(error);
           return;
         }
         if (active.intentionalClose || active.terminalHandled || !active.ready) return;
@@ -241,12 +190,6 @@ export class SshWatchManager {
         root_pid: config.pid,
         interval_seconds: config.interval_seconds,
         resume: config.resume,
-        ...(launchMode && config.command !== undefined ? { command: config.command } : {}),
-        ...(launchMode && config.args !== undefined ? { args: config.args } : {}),
-        ...(launchMode && config.cwd !== undefined ? { cwd: config.cwd } : {}),
-        ...(launchMode && config.env !== undefined ? { env: config.env } : {}),
-        ...(launchMode && config.stdout_path !== undefined ? { stdout_path: config.stdout_path } : {}),
-        ...(launchMode && config.stderr_path !== undefined ? { stderr_path: config.stderr_path } : {}),
       };
       const serialized = JSON.stringify(JSON.stringify(remoteConfig));
       child.stdin.end(`import json\nWATCHER_CONFIG = json.loads(${serialized})\n${this.watcherSource}`);

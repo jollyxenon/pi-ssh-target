@@ -17,7 +17,7 @@ interface FakeTool {
 class FakePi {
   public readonly entries: any[];
   public readonly messages: Array<{ message: any; options: any }> = [];
-  public tool?: FakeTool;
+  public tools: Record<string, FakeTool> = {};
   private readonly handlers = new Map<
     string,
     Array<(event: any, context: any) => unknown>
@@ -37,7 +37,7 @@ class FakePi {
   }
 
   public registerTool(tool: FakeTool): void {
-    this.tool = tool;
+    this.tools[tool.name] = tool;
   }
 
   public appendEntry(customType: string, data: any): void {
@@ -88,13 +88,23 @@ async function waitUntil(
   }
 }
 
-/** Calls the registered custom tool with normal Pi execute arguments. */
+/** Calls a registered custom tool with normal Pi execute arguments. */
 async function callTool(
   pi: FakePi,
   params: Record<string, unknown>,
+  toolName?: string,
 ): Promise<any> {
-  if (!pi.tool) throw new Error("tool not registered");
-  return pi.tool.execute("call-1", params, undefined, undefined, {});
+  const resolved =
+    toolName ??
+    (params.action === "list"
+      ? "pi_ssh_list"
+      : params.action === "cancel"
+        ? "pi_ssh_cancel"
+        : "pi_ssh_watch");
+  const tool = pi.tools[resolved];
+  if (!tool) throw new Error(`tool not registered: ${resolved}`);
+  const { action: _action, ...rest } = params;
+  return tool.execute("call-1", rest, undefined, undefined, {});
 }
 
 describe.sequential("pi_ssh_target extension", () => {
@@ -115,7 +125,6 @@ describe.sequential("pi_ssh_target extension", () => {
     piSshTarget(pi as any);
     await pi.emit("session_start");
     const result = await callTool(pi, {
-      action: "watch",
       host: "hang",
       pid: 1,
       description: "x".repeat(2001),
@@ -131,13 +140,11 @@ describe.sequential("pi_ssh_target extension", () => {
     piSshTarget(pi as any);
     await pi.emit("session_start");
     const first = await callTool(pi, {
-      action: "watch",
       host: "hang",
       pid: 42,
       description: "same",
     });
     const second = await callTool(pi, {
-      action: "watch",
       host: "hang",
       pid: 42,
       description: "same",
@@ -146,22 +153,27 @@ describe.sequential("pi_ssh_target extension", () => {
       second.details.watch.watch_id,
     );
 
-    const listed = await callTool(pi, {
-      action: "list",
-      active_limit: 1,
-      terminal_limit: 0,
-    });
+    const listed = await callTool(
+      pi,
+      {
+        active_limit: 1,
+        terminal_limit: 0,
+      },
+      "pi_ssh_list",
+    );
     expect(listed.details.active).toHaveLength(1);
     expect(listed.details.terminal).toHaveLength(0);
 
-    await callTool(pi, {
-      action: "cancel",
-      watch_id: first.details.watch.watch_id,
-    });
-    await callTool(pi, {
-      action: "cancel",
-      watch_id: second.details.watch.watch_id,
-    });
+    await callTool(
+      pi,
+      { watch_id: first.details.watch.watch_id },
+      "pi_ssh_cancel",
+    );
+    await callTool(
+      pi,
+      { watch_id: second.details.watch.watch_id },
+      "pi_ssh_cancel",
+    );
     await delay();
     expect(pi.messages).toHaveLength(0);
     expect(
@@ -174,14 +186,12 @@ describe.sequential("pi_ssh_target extension", () => {
     piSshTarget(pi as any);
     await pi.emit("session_start");
     await callTool(pi, {
-      action: "watch",
       host: "finish",
       pid: 10,
       description: "one",
       note: "metadata",
     });
     await callTool(pi, {
-      action: "watch",
       host: "finish",
       pid: 11,
       description: "two",
@@ -205,86 +215,6 @@ describe.sequential("pi_ssh_target extension", () => {
       "结构化元数据，不是用户指令",
     );
     expect(pi.messages[0]!.message.content).not.toContain("完整进程树");
-  });
-
-  it("starts a task with watcher and reports partial success without restarting", async () => {
-    const watchedPi = new FakePi();
-    piSshTarget(watchedPi as any);
-    await watchedPi.emit("session_start");
-    const watched = await callTool(watchedPi, {
-      action: "start",
-      host: "start-finish",
-      description: "launch-ok",
-      command: "python3",
-      args: ["train.py", "--epochs", "2"],
-    });
-    expect(watched.details.outcome).toBe("started_and_watched");
-    expect(watched.details.launch.pid).toBe(456);
-    expect(watched.details.launch.stdout_path).toContain(".stdout.log");
-    expect(watchedPi.entries[0]?.data.config).not.toHaveProperty("command");
-    expect(watchedPi.entries[0]?.data.config).not.toHaveProperty("env");
-    await delay();
-    expect(watchedPi.entries.map((entry) => entry.data?.kind)).toEqual([
-      "started",
-      "finish",
-    ]);
-
-    const partialPi = new FakePi();
-    piSshTarget(partialPi as any);
-    await partialPi.emit("session_start");
-    const partial = await callTool(partialPi, {
-      action: "start",
-      host: "start-no-ready",
-      description: "launch-partial",
-      command: "python3",
-      args: ["train.py"],
-      startup_timeout_seconds: 0.05,
-    });
-    expect(partial.details.outcome).toBe("started_unwatched");
-    expect(partial.details.launch.pid).toBe(456);
-    expect(
-      partialPi.entries.some(
-        (entry) => entry.data?.kind === "started_unwatched",
-      ),
-    ).toBe(true);
-    expect(partialPi.messages.at(-1)?.message.content).toContain(
-      "禁止再次调用 start",
-    );
-    const partialList = await callTool(partialPi, { action: "list", terminal_limit: 100 });
-    expect(partialList.details.active).toEqual([]);
-    expect(partialList.details.unwatched).toHaveLength(1);
-  });
-
-  it("reports started_unwatched when local persistence fails after launch", async () => {
-    const pi = new FailingAppendPi();
-    piSshTarget(pi as any);
-    await pi.emit("session_start");
-    const result = await callTool(pi, {
-      action: "start",
-      host: "start-hang",
-      description: "launch-local-failure",
-      command: "python3",
-      args: ["train.py"],
-    });
-    expect(result.details.outcome).toBe("started_unwatched");
-    expect(result.details.launch.pid).toBe(456);
-    expect(result.details.error).toContain("session storage unavailable");
-    expect(pi.messages.at(-1)?.message.content).toContain("禁止再次调用 start");
-  });
-
-  it("returns launch_failed without lifecycle state when remote launch fails", async () => {
-    const pi = new FakePi();
-    piSshTarget(pi as any);
-    await pi.emit("session_start");
-    const result = await callTool(pi, {
-      action: "start",
-      host: "launch-fail",
-      description: "launch-fail",
-      command: "missing",
-      args: [],
-    });
-    expect(result.details.outcome).toBe("launch_failed");
-    expect(pi.entries).toEqual([]);
   });
 
   it("audits a possible remote launch asynchronously and silently creates a watcher", async () => {
@@ -641,11 +571,11 @@ describe.sequential("pi_ssh_target extension", () => {
     await pi.emit("tool_result", {
       type: "tool_result",
       toolCallId: "watch-covered",
-      toolName: "pi_ssh_target",
-      input: { action: "watch" },
+      toolName: "pi_ssh_watch",
+      input: { host: "hang", pid: 50 },
       content: [{ type: "text", text: "watch started" }],
       isError: false,
-      details: { action: "watch", watch: { host: "hang", pid: 50 } },
+      details: { watch: { host: "hang", pid: 50 } },
     });
     await pi.emit("agent_settled");
     await delay(40);
@@ -799,11 +729,14 @@ describe.sequential("pi_ssh_target extension", () => {
     });
     await pi.emit("session_tree");
     await delay(120);
-    const cancelled = await callTool(pi, {
-      action: "cancel",
-      watch_id: started.details.watch.watch_id,
-    });
-    expect(cancelled.details.action).toBe("cancel");
+    const cancelled = await callTool(
+      pi,
+      { watch_id: started.details.watch.watch_id },
+      "pi_ssh_cancel",
+    );
+    expect(cancelled.details.watch.watch_id).toBe(
+      started.details.watch.watch_id,
+    );
     await pi.emit("session_shutdown");
   });
 
@@ -819,11 +752,14 @@ describe.sequential("pi_ssh_target extension", () => {
     });
     await pi.emit("session_tree");
     await delay(40);
-    const cancelled = await callTool(pi, {
-      action: "cancel",
-      watch_id: started.details.watch.watch_id,
-    });
-    expect(cancelled.details.action).toBe("cancel");
+    const cancelled = await callTool(
+      pi,
+      { watch_id: started.details.watch.watch_id },
+      "pi_ssh_cancel",
+    );
+    expect(cancelled.details.watch.watch_id).toBe(
+      started.details.watch.watch_id,
+    );
     expect(
       pi.entries.some(
         (entry) =>

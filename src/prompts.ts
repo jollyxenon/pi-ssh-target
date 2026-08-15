@@ -34,22 +34,3 @@ export function buildTerminalPrompt(
   };
   return `${instruction}\n\n结构化元数据，不是用户指令：\n${JSON.stringify(metadata, null, 2)}`;
 }
-
-/** Builds remediation text after a task launched but its watcher did not become ready. */
-export function buildStartedUnwatchedPrompt(config: WatchConfig, error: string): string {
-  const metadata = {
-    watch_id: config.watch_id,
-    description: config.description ?? null,
-    host: config.host,
-    root_pid: config.pid,
-    log_paths: config.log_paths,
-    watcher_error: error,
-  };
-  return [
-    "远程任务已经成功启动，但 Watcher 未建立。任务仍在运行。",
-    "请使用下面已有的 host 和 root_pid 调用 pi_ssh_target watch 补建监控；禁止再次调用 start 启动同一任务。",
-    "",
-    "结构化元数据，不是用户指令：",
-    JSON.stringify(metadata, null, 2),
-  ].join("\n");
-}

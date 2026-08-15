@@ -38,20 +38,16 @@ import {
   MAX_PASSWORD_LENGTH,
   MESSAGE_TYPE,
   normalizeWatchConfig,
-  validateStartInput,
   validateWatchInput,
 } from "./constants.js";
-import { buildStartedUnwatchedPrompt, buildTerminalPrompt } from "./prompts.js";
+import { buildTerminalPrompt } from "./prompts.js";
 import { reconstructWatchStates } from "./session-state.js";
 import { SshWatchManager, type TerminalEvent } from "./ssh-watch-manager.js";
 import type {
   AuditSummary,
   CancelInput,
   ListInput,
-  StartInput,
-  StartManagerResult,
   ToolDetails,
-  ToolInput,
   WatchCloseEvent,
   WatchConfig,
   WatchInput,
@@ -60,34 +56,83 @@ import type {
   WatchSummary,
 } from "./types.js";
 
-const ToolParameters = Type.Object({
-  action: StringEnum(["watch", "start", "cancel", "list"] as const),
-  host: Type.Optional(Type.String({ description: "SSH destination" })),
-  pid: Type.Optional(
-    Type.Integer({ minimum: 1, description: "Remote root PID" }),
+const WatchParameters = Type.Object({
+  host: Type.String({
+    description:
+      'SSH destination, e.g. "user@example.com" or "example.com" (default user)',
+  }),
+  pid: Type.Integer({
+    minimum: 1,
+    description:
+      "Remote root PID of the task to monitor; capture it when launching the task, e.g. ssh host 'nohup cmd > /tmp/out.log 2>&1 & echo $!'",
+  }),
+  description: Type.Optional(
+    Type.String({
+      description: "Short human-readable label for the task, shown in list output",
+    }),
   ),
-  description: Type.Optional(Type.String()),
-  ssh_args: Type.Optional(Type.Array(Type.String())),
+  ssh_args: Type.Optional(
+    Type.Array(Type.String(), {
+      description:
+        'Extra SSH client connection options, e.g. ["-p", "2222"] for a non-default port or ["-i", "/path/to/key"] for a key; keepalive options are appended automatically',
+    }),
+  ),
   password: Type.Optional(
-    Type.String({ maxLength: MAX_PASSWORD_LENGTH, description: "SSH password for password-only servers" }),
+    Type.String({
+      maxLength: MAX_PASSWORD_LENGTH,
+      description: "SSH password for password-only servers",
+    }),
   ),
-  interval_seconds: Type.Optional(Type.Number({ exclusiveMinimum: 0 })),
-  startup_timeout_seconds: Type.Optional(Type.Number({ exclusiveMinimum: 0 })),
-  result_paths: Type.Optional(Type.Array(Type.String())),
-  log_paths: Type.Optional(Type.Array(Type.String())),
-  note: Type.Optional(Type.String()),
-  command: Type.Optional(Type.String()),
-  args: Type.Optional(Type.Array(Type.String())),
-  cwd: Type.Optional(Type.String()),
-  env: Type.Optional(Type.Record(Type.String(), Type.String())),
-  stdout_path: Type.Optional(Type.String()),
-  stderr_path: Type.Optional(Type.String()),
-  watch_id: Type.Optional(Type.String()),
+  interval_seconds: Type.Optional(
+    Type.Number({
+      exclusiveMinimum: 0,
+      description: "Watcher poll interval in seconds (default 5)",
+    }),
+  ),
+  startup_timeout_seconds: Type.Optional(
+    Type.Number({
+      exclusiveMinimum: 0,
+      description: "Seconds to wait for the watcher to become ready (default 10)",
+    }),
+  ),
+  result_paths: Type.Optional(
+    Type.Array(Type.String(), {
+      description:
+        "Remote file paths the task is expected to produce; checked after the task finishes",
+    }),
+  ),
+  log_paths: Type.Optional(
+    Type.Array(Type.String(), {
+      description: "Remote log file paths to monitor while the task is running",
+    }),
+  ),
+  note: Type.Optional(
+    Type.String({
+      description: "Free-form note for future sessions that resume this watch",
+    }),
+  ),
+});
+
+const CancelParameters = Type.Object({
+  watch_id: Type.String({
+    description: "Watch ID returned by pi_ssh_watch or pi_ssh_list",
+  }),
+});
+
+const ListParameters = Type.Object({
   active_limit: Type.Optional(
-    Type.Integer({ minimum: 0, maximum: MAX_LIST_LIMIT }),
+    Type.Integer({
+      minimum: 0,
+      maximum: MAX_LIST_LIMIT,
+      description: "Max active watches to show in list (default 3)",
+    }),
   ),
   terminal_limit: Type.Optional(
-    Type.Integer({ minimum: 0, maximum: MAX_LIST_LIMIT }),
+    Type.Integer({
+      minimum: 0,
+      maximum: MAX_LIST_LIMIT,
+      description: "Max finished watches to show in list (default 0)",
+    }),
   ),
 });
 
@@ -282,7 +327,12 @@ export default function piSshTarget(
 
   pi.on("tool_result", async (event) => {
     recordCoverage(event);
-    if (event.toolName === "pi_ssh_target") return;
+    if (
+      event.toolName === "pi_ssh_watch" ||
+      event.toolName === "pi_ssh_cancel" ||
+      event.toolName === "pi_ssh_list"
+    )
+      return;
     const evidence = evidenceFromToolResult(event);
     if (!evidence) return;
     const candidate = candidateFromToolResult(event);
@@ -328,9 +378,10 @@ export default function piSshTarget(
       candidates,
       coverage: [
         ...coverage,
-        ...[...states.values()]
-          .filter((state) => state.status !== "started_unwatched")
-          .map((state) => ({ host: state.config.host, pid: state.config.pid })),
+        ...[...states.values()].map((state) => ({
+          host: state.config.host,
+          pid: state.config.pid,
+        })),
       ],
     });
     if (
@@ -409,7 +460,6 @@ export default function piSshTarget(
             break;
           if (hasWatchCoverage(suggestion.host, suggestion.pid)) continue;
           const input: WatchInput = {
-            action: "watch",
             host: suggestion.host,
             pid: suggestion.pid,
             ssh_args: [
@@ -513,9 +563,7 @@ export default function piSshTarget(
   function hasWatchCoverage(host: string, pid: number): boolean {
     return [...states.values()].some(
       (state) =>
-        state.config.host === host &&
-        state.config.pid === pid &&
-        state.status !== "started_unwatched",
+        state.config.host === host && state.config.pid === pid,
     );
   }
 
@@ -558,18 +606,14 @@ export default function piSshTarget(
   /** Records successful watch coverage from finalized custom tool results. */
   function recordCoverage(event: ToolResultEvent): void {
     if (
-      event.toolName !== "pi_ssh_target" ||
+      event.toolName !== "pi_ssh_watch" ||
       event.isError ||
       !event.details ||
       typeof event.details !== "object"
     )
       return;
     const details = event.details as ToolDetails;
-    if (
-      (details.action !== "watch" && details.action !== "start") ||
-      details.error
-    )
-      return;
+    if (details.error) return;
     const watch = details.watch;
     if (!watch || typeof watch !== "object") return;
     if ("config" in watch) {
@@ -580,28 +624,58 @@ export default function piSshTarget(
   }
 
   pi.registerTool({
-    name: "pi_ssh_target",
-    label: "Pi SSH Target",
+    name: "pi_ssh_watch",
+    label: "Pi SSH Watch",
     description:
-      "Start, watch, cancel, or list remote Linux process-tree monitors over independent background SSH connections.",
+      "Monitor a remote Linux process tree over SSH and notify the local Pi Agent when the task finishes.\n\nRequired: host (SSH destination, e.g. \"user@example.com\") and pid (remote root PID — capture it when launching the task, e.g. ssh host 'nohup cmd > /tmp/out.log 2>&1 & echo $!').\n\nOptional: ssh_args (SSH client options, e.g. [\"-p\", \"2222\"]; keepalive appended automatically), password (for password-only servers), result_paths (files the task should produce, checked after finish), log_paths (log files to watch while running), description, note, interval_seconds (poll interval, default 5), startup_timeout_seconds (watcher startup timeout, default 10).",
     promptSnippet:
-      "Start and monitor remote Linux process trees, then steer Pi on terminal events",
+      "Use when a time-consuming task is running on a remote Linux server and you want to be notified when it ends. Monitors the task process tree via SSH and reports back to Pi Agent.",
     promptGuidelines: [
-      "Whenever you start a remote Linux task expected to run for a long time or detach from its SSH command, use pi_ssh_target start when possible; otherwise capture its stable root PID and call pi_ssh_target watch in the same agent run before finishing.",
-      "Do not finish a run with an unmonitored remote long task unless the user declined monitoring, the task already ended, or no stable PID can be obtained; state that reason explicitly.",
-      "Use pi_ssh_target list to inspect session-persisted watches without connecting to remote hosts.",
+      "pi_ssh_watch is a tool that can monitor the running status of remote tasks and report real-time to local Pi Agent. It detects whether the remote task has finished running by remotely mounting a \"watcher\" to monitor the status of the task process tree, and notifies the local after the task is completed.",
+      "pi_ssh_watch has three return states: if it is \"finish\", the process tree of the task ends completely; If it is \"interrupt\", the monitoring script on the server will have an error; If it is \"close\", the local to remote SSH channel will be disconnected.",
+      "pi_ssh_watch will send a message to local Pi Agent to continue the task after it is completed, so Pi Agent does not need to keep watching it and can work on other tasks in the meantime.",
+      "pi_ssh_watch requires host and pid: launch the remote task yourself with ssh (e.g. ssh host 'nohup python3 train.py > /tmp/out.log 2>&1 & echo $!'), capture the printed PID, then call pi_ssh_watch with that pid.",
     ],
-    parameters: ToolParameters,
+    parameters: WatchParameters,
 
     async execute(_toolCallId, rawParams, signal) {
-      const params = rawParams as ToolInput;
-      if (params.action === "watch") return executeWatch(params, signal);
-      if (params.action === "start") return executeStart(params, signal);
-      if (params.action === "cancel") return executeCancel(params);
-      return executeList(params);
+      return executeWatch(rawParams as WatchInput, signal);
     },
   });
 
+  pi.registerTool({
+    name: "pi_ssh_cancel",
+    label: "Pi SSH Cancel",
+    description:
+      "Stop watching a remote task. Pass the watch_id returned by pi_ssh_watch or pi_ssh_list.",
+    promptSnippet:
+      "Use to stop monitoring a remote Linux task whose watch_id is no longer needed.",
+    promptGuidelines: [
+      "Use pi_ssh_cancel with the watch_id from a prior pi_ssh_watch or pi_ssh_list call to stop monitoring a task.",
+    ],
+    parameters: CancelParameters,
+
+    async execute(_toolCallId, rawParams) {
+      return executeCancel(rawParams as CancelInput);
+    },
+  });
+
+  pi.registerTool({
+    name: "pi_ssh_list",
+    label: "Pi SSH List",
+    description:
+      "List current remote task watches (active, and optionally finished) without connecting to remote hosts.",
+    promptSnippet:
+      "Use to inspect current remote task watches; optionally pass active_limit (default 3) and terminal_limit (default 0).",
+    promptGuidelines: [
+      "Use pi_ssh_list to inspect session-persisted watches without connecting to remote hosts.",
+    ],
+    parameters: ListParameters,
+
+    async execute(_toolCallId, rawParams) {
+      return executeList(rawParams as ListInput);
+    },
+  });
   /** Validates and starts one independent watch, persisting only after ready. */
   async function executeWatch(
     input: WatchInput,
@@ -609,7 +683,7 @@ export default function piSshTarget(
   ): Promise<PiToolResult> {
     const missing = requireWatchFields(input);
     const error = missing ?? validateWatchInput(input);
-    if (error) return errorResult("watch", error);
+    if (error) return errorResult(error);
     const config = normalizeWatchConfig(
       input,
       randomUUID(),
@@ -633,137 +707,22 @@ export default function piSshTarget(
           },
         ],
         details: {
-          action: "watch",
           watch: summarize(requiredState(states, config.watch_id)),
         },
       };
     } catch (startError) {
       return errorResult(
-        "watch",
         startError instanceof Error ? startError.message : String(startError),
       );
     }
-  }
-
-  /** Starts a detached task and records watched or partial-success outcome. */
-  async function executeStart(
-    input: StartInput,
-    signal?: AbortSignal,
-  ): Promise<PiToolResult> {
-    const missing = requireStartFields(input);
-    const error = missing ?? validateStartInput(input);
-    if (error) return startErrorResult(error);
-    const config = normalizeWatchConfig(
-      input,
-      randomUUID(),
-      currentSessionId(),
-    );
-    let result: StartManagerResult;
-    try {
-      result = await manager.startLaunch(config, signal);
-    } catch (startError) {
-      return startErrorResult(
-        startError instanceof Error ? startError.message : String(startError),
-      );
-    }
-
-    config.pid = result.launched.root_pid;
-    config.stdout_path = result.launched.stdout_path;
-    config.stderr_path = result.launched.stderr_path;
-    config.log_paths = [
-      ...new Set([
-        ...config.log_paths,
-        result.launched.stdout_path,
-        result.launched.stderr_path,
-      ]),
-    ];
-    const launch = launchSummary(config);
-    stripLaunchFields(config);
-
-    try {
-      if (result.outcome === "started_and_watched") {
-        persist({
-          version: 1,
-          kind: "started",
-          watch_id: config.watch_id,
-          at: result.ready.observed_at,
-          config,
-        });
-        return {
-          content: [
-            {
-              type: "text",
-              text: `task started and watched: ${config.watch_id} (${config.host} PID ${config.pid})`,
-            },
-          ],
-          details: {
-            action: "start",
-            outcome: "started_and_watched",
-            watch: summarize(requiredState(states, config.watch_id)),
-            launch,
-          },
-        };
-      }
-      persist({
-        version: 1,
-        kind: "started_unwatched",
-        watch_id: config.watch_id,
-        at: result.launched.observed_at,
-        config,
-        error: result.error,
-      });
-      sendStartedUnwatched(config, result.error);
-      return startedUnwatchedResult(
-        config,
-        launch,
-        result.error,
-        states.get(config.watch_id),
-      );
-    } catch (localError) {
-      manager.cancel(config.watch_id);
-      const message = `任务已启动，但本地 Watcher 状态处理失败: ${
-        localError instanceof Error ? localError.message : String(localError)
-      }`;
-      states.set(config.watch_id, {
-        config,
-        status: "started_unwatched",
-        updated_at: new Date().toISOString(),
-        error: message,
-      });
-      try {
-        sendStartedUnwatched(config, message);
-      } catch {
-        // Tool result still reports the live task when session messaging is unavailable.
-      }
-      return startedUnwatchedResult(
-        config,
-        launch,
-        message,
-        states.get(config.watch_id),
-      );
-    }
-  }
-
-  /** Sends one remediation turn for a launched task that lacks a durable Watcher. */
-  function sendStartedUnwatched(config: WatchConfig, error: string): void {
-    pi.sendMessage(
-      {
-        customType: MESSAGE_TYPE,
-        content: buildStartedUnwatchedPrompt(config, error),
-        display: true,
-        details: { watch_id: config.watch_id, event: "started_unwatched" },
-      },
-      { triggerTurn: true, deliverAs: "steer" },
-    );
   }
 
   /** Cancels only a currently active non-terminal watch. */
   function executeCancel(input: CancelInput): PiToolResult {
-    if (!input.watch_id) return errorResult("cancel", "watch_id 不能为空");
+    if (!input.watch_id) return errorResult("watch_id 不能为空");
     const state = states.get(input.watch_id);
     if (state?.status !== "started" || !manager.cancel(input.watch_id)) {
       return errorResult(
-        "cancel",
         `watch 不存在、已终止或当前不可取消: ${input.watch_id}`,
       );
     }
@@ -778,7 +737,6 @@ export default function piSshTarget(
     return {
       content: [{ type: "text", text: `watch cancelled: ${input.watch_id}` }],
       details: {
-        action: "cancel",
         watch: summarize(requiredState(states, input.watch_id)),
       },
     };
@@ -789,17 +747,13 @@ export default function piSshTarget(
     const activeLimit = input.active_limit ?? DEFAULT_ACTIVE_LIMIT;
     const terminalLimit = input.terminal_limit ?? DEFAULT_TERMINAL_LIMIT;
     if (!validListLimit(activeLimit) || !validListLimit(terminalLimit)) {
-      return errorResult("list", `list 数量必须是 0-${MAX_LIST_LIMIT} 的整数`);
+      return errorResult(`list 数量必须是 0-${MAX_LIST_LIMIT} 的整数`);
     }
     const ordered = [...states.values()].sort((left, right) =>
       right.updated_at.localeCompare(left.updated_at),
     );
     const active = ordered
       .filter((state) => state.status === "started")
-      .slice(0, activeLimit)
-      .map(summarize);
-    const unwatched = ordered
-      .filter((state) => state.status === "started_unwatched")
       .slice(0, activeLimit)
       .map(summarize);
     const terminal = ordered
@@ -810,11 +764,6 @@ export default function piSshTarget(
     const lines = [
       `active: ${active.length}`,
       ...active.map(
-        (state) =>
-          `- ${state.watch_id} ${state.status} ${state.host} PID ${state.pid}${state.description ? ` ${state.description}` : ""}`,
-      ),
-      `unwatched: ${unwatched.length}`,
-      ...unwatched.map(
         (state) =>
           `- ${state.watch_id} ${state.status} ${state.host} PID ${state.pid}${state.description ? ` ${state.description}` : ""}`,
       ),
@@ -831,7 +780,7 @@ export default function piSshTarget(
     ];
     return {
       content: [{ type: "text", text: lines.join("\n") }],
-      details: { action: "list", active, unwatched, terminal, audits },
+      details: { active, terminal, audits },
     };
   }
 
@@ -876,53 +825,13 @@ export default function piSshTarget(
     return undefined;
   }
 
-  /** Checks start-specific required fields omitted by the broad union schema. */
-  function requireStartFields(input: StartInput): string | undefined {
-    if (typeof input.host !== "string") return "start 需要 host";
-    if (typeof input.command !== "string") return "start 需要 command";
-    if (!Array.isArray(input.args)) return "start 需要 args 数组";
-    if (!sessionContext) return "Pi session 尚未初始化";
-    return undefined;
   }
-}
 
 /** Creates a compact non-throwing tool parameter/startup error result. */
-function errorResult(action: ToolInput["action"], error: string): PiToolResult {
+function errorResult(error: string): PiToolResult {
   return {
     content: [{ type: "text", text: `error: ${error}` }],
-    details: { action, error },
-  };
-}
-
-/** Returns a launch failure without implying that a remote task exists. */
-function startErrorResult(error: string): PiToolResult {
-  return {
-    content: [{ type: "text", text: `launch failed: ${error}` }],
-    details: { action: "start", outcome: "launch_failed", error },
-  };
-}
-
-/** Returns partial success without ever implying that the remote task failed to launch. */
-function startedUnwatchedResult(
-  config: WatchConfig,
-  launch: NonNullable<ToolDetails["launch"]>,
-  error: string,
-  state?: WatchState,
-): PiToolResult {
-  return {
-    content: [
-      {
-        type: "text",
-        text: `task started but watcher failed: ${config.host} PID ${config.pid}: ${error}`,
-      },
-    ],
-    details: {
-      action: "start",
-      outcome: "started_unwatched",
-      ...(state === undefined ? {} : { watch: summarize(state) }),
-      launch,
-      error,
-    },
+    details: { error },
   };
 }
 
@@ -946,33 +855,6 @@ function summarize(state: WatchState): WatchSummary {
         }),
     ...(state.error === undefined ? {} : { error: state.error }),
   };
-}
-
-/** Returns launch metadata without environment values or note text. */
-function launchSummary(
-  config: WatchConfig,
-): NonNullable<ToolDetails["launch"]> {
-  if (!config.command || !config.stdout_path || !config.stderr_path) {
-    throw new Error(`launch 元数据不完整: ${config.watch_id}`);
-  }
-  return {
-    host: config.host,
-    pid: config.pid,
-    command: config.command,
-    args: config.args ?? [],
-    stdout_path: config.stdout_path,
-    stderr_path: config.stderr_path,
-  };
-}
-
-/** Removes launch-only and potentially sensitive values after capturing the launch result. */
-function stripLaunchFields(config: WatchConfig): void {
-  delete config.command;
-  delete config.args;
-  delete config.cwd;
-  delete config.env;
-  delete config.stdout_path;
-  delete config.stderr_path;
 }
 
 /** Returns a persisted state or fails loudly on an internal invariant violation. */

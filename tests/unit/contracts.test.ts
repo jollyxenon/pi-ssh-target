@@ -24,11 +24,9 @@ import {
   DEFAULT_TERMINAL_LIMIT,
   LIFECYCLE_ENTRY_TYPE,
   normalizeWatchConfig,
-  validateStartInput,
   validateWatchInput,
 } from "../../src/constants.js";
 import {
-  buildStartedUnwatchedPrompt,
   buildTerminalPrompt,
 } from "../../src/prompts.js";
 import { consumeLines, parseProtocolLine } from "../../src/protocol.js";
@@ -107,7 +105,7 @@ function snapshot(): AuditSnapshot {
 describe("shared contracts", () => {
   it("applies required defaults and fixed list counts", () => {
     const normalized = normalizeWatchConfig(
-      { action: "watch", host: "remote", pid: 42, description: "job" },
+      { host: "remote", pid: 42, description: "job" },
       "watch-1",
       "session-1",
     );
@@ -117,17 +115,16 @@ describe("shared contracts", () => {
     );
     expect([DEFAULT_ACTIVE_LIMIT, DEFAULT_TERMINAL_LIMIT]).toEqual([3, 0]);
     const withPassword = normalizeWatchConfig(
-      { action: "watch", host: "remote", pid: 42, password: "s3cret" },
+      { host: "remote", pid: 42, password: "s3cret" },
       "watch-2",
       "session-1",
     );
     expect(withPassword.password).toBe("s3cret");
   });
 
-  it("validates metadata and structured start input", () => {
+  it("validates metadata and structured watch input", () => {
     expect(
       validateWatchInput({
-        action: "watch",
         host: "h",
         pid: 1,
         description: "x".repeat(2001),
@@ -135,7 +132,6 @@ describe("shared contracts", () => {
     ).toContain("description");
     expect(
       validateWatchInput({
-        action: "watch",
         host: "h",
         pid: 1,
         description: "j",
@@ -144,29 +140,12 @@ describe("shared contracts", () => {
     ).toContain("note");
     expect(
       validateWatchInput({
-        action: "watch",
         host: "h",
         pid: 1,
         description: "j",
         result_paths: Array(21).fill("x"),
       }),
     ).toContain("20");
-    const input = {
-      action: "start" as const,
-      host: "remote",
-      description: "job",
-      command: "python3",
-      args: ["train.py", "a; b"],
-    };
-    expect(validateStartInput(input)).toBeUndefined();
-    expect(validateStartInput({ ...input, password: "s3cret" })).toBeUndefined();
-    expect(
-      validateStartInput({ ...input, password: "x".repeat(513) }),
-    ).toContain("password");
-    expect(validateStartInput({ ...input, password: "" })).toContain("password");
-    expect(
-      validateStartInput({ ...input, env: { "BAD-NAME": "x" } }),
-    ).toContain("env");
   });
 
   it("parses fixed protocol lines and preserves chunk tails", () => {
@@ -780,19 +759,7 @@ describe("shared contracts", () => {
     }
   });
 
-  it("builds terminal and partial-success prompts as inert metadata", () => {
-    expect(
-      buildStartedUnwatchedPrompt(
-        {
-          ...config,
-          command: "python3",
-          args: ["train.py"],
-          stdout_path: "/tmp/o",
-          stderr_path: "/tmp/e",
-        },
-        "timeout",
-      ),
-    ).toContain("禁止再次调用 start");
+  it("builds terminal prompts as inert metadata", () => {
     expect(
       buildTerminalPrompt(config, {
         event: "interrupt",
