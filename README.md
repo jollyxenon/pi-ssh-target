@@ -133,7 +133,7 @@ Package 注册一个工具：`pi_ssh_target`。工具有四种 action：`start`�
 
 | 参数 | 默认值 | 说明 |
 |---|---:|---|
-| `ssh_args` | `[]` | 原样放在 destination 前的 SSH argv，例如端口、密钥或 ProxyJump |
+| `ssh_args` | `[]` | 原样放在 destination 前的 SSH argv，例如端口、密钥或 ProxyJump；同名 `-o` 选项可覆盖插件默认注入的保活参数（见下文） |
 | `password` | 无 | SSH 密码（仅密码认证的服务器，如租用 GPU 平台）；非空且最多 512 字符。密码经临时 askpass 脚本注入子进程环境，脚本 0700 权限、SSH 结束后立即删除；会随会话记录持久化以便恢复 |
 | `interval_seconds` | `5` | 远程 `/proc` 扫描间隔 |
 | `startup_timeout_seconds` | `10` | 等待 Watcher `ready` 的秒数 |
@@ -159,11 +159,13 @@ Package 注册一个工具：`pi_ssh_target`。工具有四种 action：`start`�
 }
 ```
 
-插件启动的命令等价于：
+插件启动的命令等价于（默认注入 SSH 应用层保活参数）：
 
 ```text
-ssh <ssh_args...> -- <host> python3 -
+ssh <ssh_args...> -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -- <host> python3 -
 ```
+
+默认保活让 SSH 客户端每 30 秒经现有加密通道发送应用层保活消息，连续 3 次无响应（约 90 秒）后主动退出，此时插件按无合法终态退出合成 `close` 并 steer。弱网场景（如校园 VPN 断连导致 TCP 半开）下，这能保证断连在约 90 秒内被通报，而不是让 ssh 进程无限挂起。默认参数放在用户 `ssh_args` 之后，OpenSSH 对重复 `-o` 选项第一个生效，因此 Agent 可通过 `ssh_args` 提供同名 `-o` 覆盖默认值（例如 `"-o", "ServerAliveInterval=60"`）。保活只对新建的 SSH 子进程生效，升级前已登记的 watch 不会自动获得保活，需要重新 `start`/`watch`。
 
 参数通过 `child_process.spawn()` 作为独立 argv 传递，不经过本地 shell。Python Watcher 源码和配置从 stdin 发送，远程主机不需要预装本 package。
 
@@ -359,7 +361,7 @@ pi.sendMessage(message, { triggerTurn: true, deliverAs: "steer" })
 - 不提供反向隧道、HTTP listener、socket、token 或事件文件传输。
 - `/proc` 进程树发现失败时，不降级成单 PID 监控。
 - 不自动读取远程日志、结果文件或完整进程树。
-- 不限制 `ssh_args` 内容；连接行为由调用方负责。
+- 不限制 `ssh_args` 内容；连接行为由调用方负责。插件只默认注入 `ServerAliveInterval=30` 与 `ServerAliveCountMax=3`，Agent 提供的同名选项可覆盖。
 - 不提供交互式密码提示；需要密码的连接必须显式传 `password` 参数，否则可能卡在启动阶段并触发启动超时。
 - 主动关闭本机 SSH 后，远程 Python 进程不保证立即退出。
 - 根进程退出前尚未被扫描到、并且已经脱离原进程树的后代可能无法发现；需要时可降低 `interval_seconds`。
